@@ -42,7 +42,7 @@ from PIL import Image
 from torch import Tensor, nn
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
-from transformers.utils.dummy_vision_objects import DetrFeatureExtractor
+from transformers import DetrFeatureExtractor
 from transformers.activations import ACT2FN
 from transformers.utils.generic import ModelOutput
 from transformers.utils.import_utils import (
@@ -58,6 +58,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 import model.transform as T
+import importlib.util
 
 from .load_custom import load_cuda_kernels
 from .util import generalized_box_iou, sigmoid_focal_loss
@@ -503,9 +504,9 @@ class DeformableDetrDecoderOutput(ModelOutput):
             used to compute the weighted average in the cross-attention heads.
     """
 
-    last_hidden_state: torch.FloatTensor = None
-    intermediate_hidden_states: torch.FloatTensor = None
-    intermediate_reference_points: torch.FloatTensor = None
+    last_hidden_state: Optional[torch.FloatTensor] = None
+    intermediate_hidden_states: Optional[torch.FloatTensor] = None
+    intermediate_reference_points: Optional[torch.FloatTensor] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
