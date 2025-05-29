@@ -42,11 +42,10 @@ from PIL import Image
 from torch import Tensor, nn
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
-from transformers import DetrFeatureExtractor
+from transformers.utils.dummy_vision_objects import DetrFeatureExtractor
 from transformers.activations import ACT2FN
-from transformers.file_utils import (
-    ModelOutput,
-    add_start_docstrings,
+from transformers.utils.generic import ModelOutput
+from transformers.utils.import_utils import (
     is_scipy_available,
     is_timm_available,
     is_torch_cuda_available,
@@ -54,7 +53,8 @@ from transformers.file_utils import (
     requires_backends,
 )
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.modeling_utils import PretrainedConfig, PreTrainedModel
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 import model.transform as T
