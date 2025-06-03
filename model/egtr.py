@@ -132,7 +132,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
             output_dim=4,
             num_layers=3,
         )
-
+        # Initialization to stabilize training
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(config.num_labels) * bias_value
@@ -320,7 +320,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
             outputs_coord = outputs_coord.permute(1, 0, 2, 3)
 
         _, num_object_queries, _ = logits.shape
-        unscaling = self.head_dim ** 0.5
+        unscaling = self.head_dim**0.5
 
         # Get self-attention byproducts from deformable detr
         decoder_attention_queries = outputs[
