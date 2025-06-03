@@ -26,7 +26,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch Deformable DETR model."""
+"""PyTorch Deformable DETR model."""
 
 
 import copy
@@ -55,7 +55,7 @@ from transformers.utils.import_utils import (
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
-from transformers.utils import logging
+from transformers.utils import logging, add_start_docstrings
 
 import model.transform as T
 import importlib.util
@@ -168,6 +168,7 @@ class DeformableDetrConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
+
     model_type = "deformable_detr"
     attribute_map = {
         "hidden_size": "d_model",
@@ -397,6 +398,7 @@ if is_torch_cuda_available() and is_ninja_available():
         )
         MultiScaleDeformableAttention = None
 else:
+    print("Torch cuda or ninja not available")
     MultiScaleDeformableAttention = None
 
 
@@ -1128,7 +1130,7 @@ class DeformableDetrMultiheadAttention(nn.Module):
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {num_heads})."
             )
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
 
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -2134,7 +2136,7 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
                 [valid_width.unsqueeze(-1), valid_height.unsqueeze(-1)], 1
             ).view(batch_size, 1, 1, 2)
             grid = (grid.unsqueeze(0).expand(batch_size, -1, -1, -1) + 0.5) / scale
-            width_heigth = torch.ones_like(grid) * 0.05 * (2.0 ** level)
+            width_heigth = torch.ones_like(grid) * 0.05 * (2.0**level)
             proposal = torch.cat((grid, width_heigth), -1).view(batch_size, -1, 4)
             proposals.append(proposal)
             _cur += height * width
@@ -2962,7 +2964,7 @@ class DeformableDetrHungarianMatcher(nn.Module):
         alpha = 0.25
         gamma = 2.0
         neg_cost_class = (
-            (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())
+            (1 - alpha) * (out_prob**gamma) * (-(1 - out_prob + 1e-8).log())
         )
         pos_cost_class = alpha * ((1 - out_prob) ** gamma) * (-(out_prob + 1e-8).log())
         class_cost = (
