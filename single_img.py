@@ -109,7 +109,7 @@ def draw_relation_boxes(image, triplets):
     ax.imshow(image_np)
 
     # Generate distinct colors for each relation
-    cmap = plt.cm.get_cmap('hsv', len(triplets) + 1)
+    cmap = plt.cm.get_cmap("hsv", len(triplets) + 1)
 
     for i, triplet in enumerate(triplets):
         color = cmap(i)
@@ -117,20 +117,33 @@ def draw_relation_boxes(image, triplets):
         # Draw subject bounding box
         x1, y1, x2, y2 = triplet["sub_bbox"]
         rect_sub = patches.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor=color, facecolor="none", label=f"Subject: {triplet['subject']}"
+            (x1, y1),
+            x2 - x1,
+            y2 - y1,
+            linewidth=2,
+            edgecolor=color,
+            facecolor="none",
+            label=f"Subject: {triplet['subject']}",
         )
         ax.add_patch(rect_sub)
 
         # Draw object bounding box
         x1, y1, x2, y2 = triplet["obj_bbox"]
         rect_obj = patches.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor=color, facecolor="none", label=f"Object: {triplet['object']}"
+            (x1, y1),
+            x2 - x1,
+            y2 - y1,
+            linewidth=2,
+            edgecolor=color,
+            facecolor="none",
+            label=f"Object: {triplet['object']}",
         )
         ax.add_patch(rect_obj)
 
     # Add legend and show
     ax.legend()
     plt.show()
+
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, o):
@@ -234,10 +247,12 @@ def parse_arguments():
 
 def main():
     parser = parse_arguments()
-    args, _ = parser.parse_known_args()
-    # Load model
-    config = DeformableDetrConfig.from_pretrained(args.artifact_path)
-    config.logit_adjustment = args.logit_adjustment
+    # Save results to JSON
+    with open(args.output_json, "w") as f:
+        json.dump(triplets, f, indent=4, cls=NumpyEncoder)
+
+    # Visualize the bounding boxes for all relations
+    draw_relation_boxes(image, triplets)
     config.logit_adj_tau = args.logit_adj_tau
     model = DetrForSceneGraphGeneration.from_pretrained(
         args.architecture, config=config, ignore_mismatched_sizes=True
@@ -286,7 +301,7 @@ def main():
     with open(args.output_json, "w") as f:
         json.dump(triplets, f, indent=4, cls=NumpyEncoder)
 
-    draw_relation_boxes(image,triplets)
+    draw_relation_boxes(image, triplets)
 
 
 if __name__ == "__main__":
