@@ -1,6 +1,7 @@
 from util.box_ops import rescale_bboxes
 from PIL import Image
 import pdb
+import os
 import argparse
 import json
 import numpy as np
@@ -18,6 +19,119 @@ from transformers.models.detr.feature_extraction_detr import (
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+
+def infer_single_image(outputs, image, num_labels, rel_categories, id2label, topk=10):
+    """Perform inference on a single image and return formatted triplets.
+
+    Args:
+        outputs: Model outputs containing logits, boxes, connectivity and rel scores
+        image: PIL Image object
+        num_labels: Number of object classes
+        rel_categories: List of relationship categories
+        id2label: Mapping from class IDs to label names
+        topk: Number of top triplets to return (default: 10)
+
+    Returns:
+        List of formatted triplets with subject, predicate, object and their metadata
+    """
+    pred_logits = outputs["logits"][0]
+    pred_boxes = outputs.pred_boxes[0]
+
+    # Get object predictions
+    obj_scores, pred_classes = torch.max(pred_logits.softmax(-1)[:, :num_labels], -1)
+    pred_classes = pred_classes.clone().cpu().numpy().tolist()
+    bboxes = rescale_bboxes(pred_boxes.cpu(), (image.width, image.height))
+
+    # Calculate subject-object scores
+    sub_ob_scores = torch.outer(obj_scores, obj_scores)
+    sub_ob_scores[
+        torch.arange(pred_logits.size(0)), torch.arange(pred_logits.size(0))
+    ] = 0.0
+
+    # Calculate relationship scores
+    pred_connectivity = torch.clamp(outputs["pred_connectivity"], 0.0, 1.0)
+    pred_rel = torch.clamp(outputs["pred_rel"], 0.0, 1.0)
+    pred_rel = torch.mul(pred_rel, pred_connectivity)
+
+    # Get top scoring triplets
+    triplet_score = torch.mul(pred_rel.max(-1)[0], sub_ob_scores)
+    pred_rel_inds = argsort_desc(triplet_score.cpu().clone().numpy())[:topk, :]
+
+    # Extract metadata for top triplets
+    best_scores = (
+        pred_rel.max(-1)[0]
+        .squeeze()[pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
+        .cpu()
+        .numpy()
+        .tolist()
+    )
+    best_predicate_indices = (
+        pred_rel.max(-1)[1]
+        .squeeze()[pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
+        .cpu()
+        .numpy()
+        .tolist()
+    )
+    predicates = [rel_categories[i] for i in best_predicate_indices]
+
+    subject_names = [id2label[pred_classes[i]] for i in pred_rel_inds[:, 1]]
+    subject_bbox = (
+        bboxes.squeeze(dim=0)[pred_rel_inds[:, 1]].cpu().clone().numpy().tolist()
+    )
+    object_names = [id2label[pred_classes[j]] for j in pred_rel_inds[:, 2]]
+    object_bbox = (
+        bboxes.squeeze(dim=0)[pred_rel_inds[:, 2]].cpu().clone().numpy().tolist()
+    )
+
+    # Format triplets
+    return [
+        {
+            "subject": subject_names[i],
+            "sub_bbox": subject_bbox[i],
+            "predicate": predicates[i],
+            "object": object_names[i],
+            "obj_bbox": object_bbox[i],
+            "score": best_scores[i],
+        }
+        for i in range(len(pred_rel_inds))
+    ]
+
+
+def draw_relation_boxes(image, triplets):
+    """Draw bounding boxes for each relation in the triplets with separate colors.
+
+    Args:
+        image: PIL Image object
+        triplets: List of formatted triplets with subject, predicate, object and their metadata
+    """
+    image_np = np.array(image)
+    fig, ax = plt.subplots(1)
+    ax.imshow(image_np)
+
+    # Generate distinct colors for each relation
+    cmap = plt.cm.get_cmap('hsv', len(triplets) + 1)
+
+    for i, triplet in enumerate(triplets):
+        color = cmap(i)
+
+        # Draw subject bounding box
+        x1, y1, x2, y2 = triplet["sub_bbox"]
+        rect_sub = patches.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor=color, facecolor="none", label=f"Subject: {triplet['subject']}"
+        )
+        ax.add_patch(rect_sub)
+
+        # Draw object bounding box
+        x1, y1, x2, y2 = triplet["obj_bbox"]
+        rect_obj = patches.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1, linewidth=2, edgecolor=color, facecolor="none", label=f"Object: {triplet['object']}"
+        )
+        ax.add_patch(rect_obj)
+
+    # Add legend and show
+    ax.legend()
+    plt.show()
+
 class NumpyEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(o, np.ndarray):
@@ -29,17 +143,28 @@ class NumpyEncoder(json.JSONEncoder):
         return super(NumpyEncoder, self).default(o)
 
 
-def process_bbox(out_bbox, orig_size):
-    "Take bbox logits and return the image bbox to corner's format"
+def load_model(artifact_path, architecture, device):
+    config = DeformableDetrConfig.from_pretrained(artifact_path)
+    model = DetrForSceneGraphGeneration.from_pretrained(
+        architecture, config=config, ignore_mismatched_sizes=True
+    )
+    ckpt_paths = sorted(
+        glob(os.path.join(artifact_path, "checkpoints", "epoch=*.ckpt")),
+        key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
+    )
+    if not ckpt_paths:
+        raise FileNotFoundError("No checkpoint files found in the artifact path.")
+    ckpt_path = ckpt_paths[-1]
+    state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
 
-    box = center_to_corners_format(out_bbox)
-    img_h= orig_size[0]
-    img_w= orig_size[1]
+    for k in list(state_dict.keys()):
+        state_dict[k[6:]] = state_dict.pop(k)
 
-    scale_fct = torch.tensor([img_w, img_h, img_w, img_h]).to(box.device)
-    box = box * scale_fct  # Simple broadcasting will work for a single image
-    pdb.set_trace()
-    return box
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+
+    return model
 
 
 def parse_arguments():
@@ -61,6 +186,7 @@ def parse_arguments():
         type=str,
         default="./artifacts",
     )
+    parser.add_argument("--device", type=str, default="cuda")
     # Architecture
     parser.add_argument("--architecture", type=str, default="SenseTime/deformable-detr")
     parser.add_argument("--num_queries", type=int, default=200)
@@ -117,40 +243,22 @@ def main():
         args.architecture, config=config, ignore_mismatched_sizes=True
     )
 
+    # Preprocess image
+    image = Image.open(args.image_path).convert("RGB")
+
     # Load checkpoint
-    ckpt_path = sorted(
-        glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
-        key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-    )[-1]
-    state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
-    for k in list(state_dict.keys()):
-        state_dict[k[6:]] = state_dict.pop(k)  # Remove "model." prefix
-
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda":
-        print("Using GPU")
-    else:
-        print("Using CPU")
-
-    model.to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
+    model = load_model(args.artifact_path, args.architecture, args.device)
 
     # Load feature extractor
     feature_extractor = DeformableDetrFeatureExtractor.from_pretrained(
         "SenseTime/deformable-detr", size=args.min_size, max_size=args.max_size
     )
 
-    # Preprocess image
-    image = Image.open(args.image_path).convert("RGB")
-
     # note that is padding the images with the largest image in the batch (here we have 1 image onlx
-    pixel_values = feature_extractor(images=image, return_tensors="pt").to(device)
+    pixel_values = feature_extractor(images=image, return_tensors="pt").to(args.device)
     if torch.cuda.is_available():
         pixel_values["pixel_values"] = pixel_values["pixel_values"].cuda()
         pixel_values["pixel_mask"] = pixel_values["pixel_mask"].cuda()
-
     # Run inference
     with torch.no_grad():
         outputs = model(
@@ -160,10 +268,6 @@ def main():
             output_attention_states=True,
             output_hidden_states=True,
         )
-
-    # Get original image size
-    orig_size = torch.tensor([image.height, image.width]).unsqueeze(0).to(device)
-
     # Load dataset to get label mappings
     test_dataset = VGDataset(
         data_folder=args.data_path,
@@ -171,101 +275,18 @@ def main():
         split=args.split,
         num_object_queries=args.num_queries,
     )
-
     # Create label mappings
     id2label = {k - 1: v["name"] for k, v in test_dataset.coco.cats.items()}
-
     rel_categories = test_dataset.rel_categories
     num_labels = max(id2label.keys()) + 1
-    # Object scores and classes
-    pred_logits = outputs["logits"][0]
-    pred_boxes = outputs.pred_boxes[0]
 
-    obj_scores, pred_classes = torch.max(pred_logits.softmax(-1)[:, :num_labels], -1)
-    pred_classes = pred_classes.clone().cpu().numpy().tolist()
+    triplets = infer_single_image(outputs, image, num_labels, rel_categories, id2label)
 
-    pdb.set_trace()
-    bboxes = rescale_bboxes(pred_boxes.cpu(), (image.width,image.height))
-
-    sub_ob_scores = torch.outer(obj_scores, obj_scores)
-    sub_ob_scores[
-        torch.arange(pred_logits.size(0)), torch.arange(pred_logits.size(0))
-    ] = 0.0  # prevent self-connection
-
-    # predicate score with connectivity
-    pred_connectivity = torch.clamp(outputs["pred_connectivity"], 0.0, 1.0)
-    # clamp connectivity scores and weigh them with relationship scores
-    pred_rel = torch.clamp(
-        outputs["pred_rel"], 0.0, 1.0
-    )  # Shape: [num_queries, num_queries, num_rel_classes]
-    pred_rel = torch.mul(
-        pred_rel, pred_connectivity
-    )  # Shape: [num_queries, num_queries, 1]
-
-    triplet_score = torch.mul(
-        pred_rel.max(-1)[0], sub_ob_scores
-    )  # element-wise multiplication
-    # Get the object indices of the top 10 triplets based on the triplet score
-    pred_rel_inds = argsort_desc(triplet_score.cpu().clone().numpy())[
-        : args.topk, :
-    ]  # [pred_rels, 2(s,o)]
-    # can be used to depict histograms for each predicate of the selected subjects/objects
-    rel_scores = (
-        pred_rel.cpu()
-        .clone()
-        .numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
-    )  # [pred_rels, topk]
-
-    best_scores = (
-        pred_rel.max(-1)[0]
-        .squeeze()[pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
-        .cpu()
-        .numpy()
-        .tolist()
-    )
-    best_predicate_idx = pred_rel.max(-1)[1].squeeze()[
-        pred_rel_inds[:, 1], pred_rel_inds[:, 2]
-    ]
-    best_predicate_indices = best_predicate_idx.cpu().numpy().tolist()
-
-    # find true names and bbs
-    predicates = [rel_categories[i] for i in best_predicate_indices]
-    subject_names = [id2label[pred_classes[i]] for i in pred_rel_inds[:, 1]]
-
-    subject_bbox = bboxes.squeeze(dim=0)[pred_rel_inds[:, 1]].cpu().clone().numpy().tolist()
-    object_names = [id2label[pred_classes[j]] for j in pred_rel_inds[:, 2]]
-    object_bbox = bboxes.squeeze(dim=0)[pred_rel_inds[:, 2]].cpu().clone().numpy().tolist()
-
-    pdb.set_trace()
-    # Format triplets
-    triplets = []
-    for i in range(len(pred_rel_inds)):
-        triplets.append(
-            {
-                "subject": subject_names[i],
-                "sub_bbox": subject_bbox[i],
-                "predicate": predicates[i],
-                "object": object_names[i],
-                "obj_bbox": object_bbox[i],
-                "score": best_scores[i],
-            }
-        )
     # Save results to JSON
     with open(args.output_json, "w") as f:
-       json.dump(triplets, f, indent=4, cls=NumpyEncoder)
+        json.dump(triplets, f, indent=4, cls=NumpyEncoder)
 
-    image_np = np.array(image)
-
-    fig, ax = plt.subplots(1)
-    ax.imshow(image_np)
-
-    #Add bounding box (using first box)
-    x1, y1, x2, y2 = triplets[0]["obj_bbox"]
-    pdb.set_trace()
-    rect = patches.Rectangle((x1, y1), x2-x1, y2-y1,
-                           linewidth=2, edgecolor='r', facecolor='none')
-    ax.add_patch(rect)
-    plt.show()
+    draw_relation_boxes(image,triplets)
 
 
 if __name__ == "__main__":
