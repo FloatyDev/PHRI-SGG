@@ -57,7 +57,6 @@ def infer_single_image(outputs, image, num_labels, rel_categories, id2label, top
     triplet_score = torch.mul(pred_rel.max(-1)[0], sub_ob_scores)
     pred_rel_inds = argsort_desc(triplet_score.cpu().clone().numpy())[:topk, :]
 
-    # Extract metadata for top triplets
     best_scores = (
         pred_rel.max(-1)[0]
         .squeeze()[pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
@@ -219,7 +218,7 @@ def parse_arguments():
     parser.add_argument("--num_workers", type=int, default=4)
     # Visualization
     parser.add_argument(
-        "--image_path", type=str, default="./test.jpg", help="Input image path"
+        "--image_path", type=str, default="./times-square-new-york-city-new-york-america.jpg", help="Input image path"
     )
     parser.add_argument(
         "--output_json", type=str, default="scene_graph.json", help="Output JSON path"
@@ -247,13 +246,13 @@ def parse_arguments():
 
 def main():
     parser = parse_arguments()
+    args = parser.parse_args()
     # Save results to JSON
-    with open(args.output_json, "w") as f:
-        json.dump(triplets, f, indent=4, cls=NumpyEncoder)
 
-    # Visualize the bounding boxes for all relations
-    draw_relation_boxes(image, triplets)
+    config = DeformableDetrConfig.from_pretrained(args.artifact_path)
+    config.logit_adjustment = args.logit_adjustment
     config.logit_adj_tau = args.logit_adj_tau
+
     model = DetrForSceneGraphGeneration.from_pretrained(
         args.architecture, config=config, ignore_mismatched_sizes=True
     )
