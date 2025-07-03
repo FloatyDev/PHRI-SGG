@@ -38,6 +38,7 @@ from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
 
 seed_everything(42, workers=True)
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Reference: https://github.com/yuweihao/KERN/blob/master/models/eval_rels.py
 def evaluate_batch(
@@ -322,34 +323,47 @@ class SGG(pl.LightningModule):
         loss, loss_dict = self.common_step(batch, batch_idx)
         # logs metrics for each training_step,
         # and the average across the epoch
-        log_dict = {
-            "step": torch.tensor(self.global_step, dtype=torch.float32),
-            "training_loss": loss.item(),
-        }
-        log_dict.update({f"training_{k}": v.item() for k, v in loss_dict.items()})
-        self.log_dict(log_dict)
+        # Log metrics directly with epoch aggregation
+        self.log("training_loss", loss, on_step=True, on_epoch=True)
+        for k, v in loss_dict.items():
+             self.log(f"training_{k}", v, on_step=True, on_epoch=True)
+
         return loss
+
+    def on_validation_epoch_start(self):
+        self.validation_step_outputs = []  # Initialize collection list
 
     def validation_step(self, batch, batch_idx):
         loss, loss_dict = self.common_step(batch, batch_idx)
         loss_dict["loss"] = loss
-        del loss
+
+        self.validation_step_outputs.append(loss_dict)
         return loss_dict
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
+        if not self.validation_step_outputs:
+            return
+
         log_dict = {
             "step": torch.tensor(self.global_step, dtype=torch.float32),
             "epoch": torch.tensor(self.current_epoch, dtype=torch.float32),
         }
-        for k in outputs[0].keys():
+        # aggregate metrics across batches
+        for k in self.validation_step_outputs[0].keys():
             log_dict[f"validation_" + k] = (
-                torch.stack([x[k] for x in outputs]).mean().item()
+                torch.stack([x[k] for x in self.validation_step_outputs]).mean().item()
             )
         self.log_dict(log_dict, on_epoch=True)
+        self.validation_step_outputs.clear()
 
     @rank_zero_only
     def on_train_start(self) -> None:
-        self.config.save_pretrained(self.logger.log_dir)
+        if hasattr(self, "logger") and self.logger is not None:
+            log_dir = self.logger.log_dir
+        else:
+            log_dir = os.getcwd()
+
+        self.config.save_pretrained(log_dir)
         return super().on_train_start()
 
     def test_step(self, batch, batch_idx):
@@ -387,7 +401,7 @@ class SGG(pl.LightningModule):
                 }
                 self.coco_evaluator.update(res)
 
-    def test_epoch_end(self, outputs):
+    def on_test_epoch_end(self):
         log_dict = {}
         # log OD
         if self.coco_evaluator is not None:
@@ -420,6 +434,7 @@ class SGG(pl.LightningModule):
         if self.oi_evaluator is not None:
             metrics = self.oi_evaluator.aggregate_metrics()
             log_dict.update(metrics)
+
         self.log_dict(log_dict, on_epoch=True)
         return log_dict
 
@@ -527,7 +542,7 @@ if __name__ == "__main__":
     )  # OI: False
 
     # Training
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--accumulate", type=int, default=2)
     parser.add_argument("--gpus", type=int, default=8)
     parser.add_argument("--max_epochs", type=int, default=50)
@@ -770,7 +785,8 @@ if __name__ == "__main__":
             trainer = Trainer(
                 precision=args.precision,
                 logger=logger,
-                gpus=args.gpus,
+                devices = args.gpus,
+                accelerator = "gpu",
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
