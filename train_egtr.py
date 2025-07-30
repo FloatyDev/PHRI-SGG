@@ -288,17 +288,46 @@ class SGG(pl.LightningModule):
                 ignore_mismatched_sizes=True,
                 output_loading_info=True,
                 fg_matrix=fg_matrix,
+                ignore_keys=[r"^model\.rel_predictor\..*"],
             )
             self.initialized_keys = load_info["missing_keys"] + [
                 _key for _key, _, _ in load_info["mismatched_keys"]
             ]
-
         if main_trained:
             state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
             for k in list(state_dict.keys()):
                 state_dict[k[6:]] = state_dict.pop(k)  # "model."
             self.model.load_state_dict(state_dict, strict=False)
 
+        # only train relation_head
+        if train_relation_head:
+            # disable all parameters and enable training only the relation head
+            for p in self.model.parameters():
+                p.requires_grad = False
+
+            # enable the layers that must learn
+            allow = (
+                "rel_predictor.",  # hierarchical head
+                "proj_q",  # optional: query projection
+                "proj_k",  # optional: key   projection
+                "final_sub_proj",  # keeps sub-object embeddings in sync
+                "final_obj_proj",  # keeps object embeddings in sync
+                "rel_predictor_gate",  # tiny gate mlp, if you use it
+            )
+
+            for n, p in self.model.named_parameters():
+                if n.startswith(allow):
+                    p.requires_grad = True
+
+            trainable = [n for n, p in self.model.named_parameters() if p.requires_grad]
+            unexpected = [n for n in trainable if not n.startswith(allow)]
+
+            assert not unexpected, (
+                f"[sgg] unexpected trainable parameters:\n  {unexpected[:10]}… "
+                f"(total {len(unexpected)})"
+            )
+
+            print(f"[sgg] trainable parameter count: {len(trainable)}")
         # see https://github.com/PyTorchLightning/pytorch-lightning/pull/1896
         self.lr = lr
         self.lr_backbone = lr_backbone
@@ -347,7 +376,7 @@ class SGG(pl.LightningModule):
         # Log metrics directly with epoch aggregation
         self.log("training_loss", loss, on_step=True, on_epoch=True)
         for k, v in loss_dict.items():
-             self.log(f"training_{k}", v, on_step=True, on_epoch=True)
+            self.log(f"training_{k}", v, on_step=True, on_epoch=True)
 
         return loss
 
@@ -794,6 +823,13 @@ if __name__ == "__main__":
         connectivity_loss_coefficient=args.connectivity_loss_coefficient,
         logit_adjustment=args.logit_adjustment,
         logit_adj_tau=args.logit_adj_tau,
+        hierarchical=args.hierarchical,
+        num_geometric=args.num_geometric,
+        num_possessive=args.num_possessive,
+        num_semantic=args.num_semantic,
+        num_negatives=args.num_negatives,
+        super_weight=args.super_weight,
+        train_relation_head=args.train_head,
     )
 
     # Callback
@@ -863,7 +899,7 @@ if __name__ == "__main__":
                 architecture=args.architecture,
                 backbone_dirpath=args.backbone_dirpath,
                 auxiliary_loss=args.auxiliary_loss,
-                lr=args.lr * 0.1,
+                lr=args.lr * 0.1,  # change lr
                 lr_backbone=args.lr_backbone * 0.1,
                 lr_initialized=args.lr_initialized * 0.1,
                 weight_decay=args.weight_decay,
@@ -894,6 +930,13 @@ if __name__ == "__main__":
                 connectivity_loss_coefficient=args.connectivity_loss_coefficient,
                 logit_adjustment=args.logit_adjustment,
                 logit_adj_tau=args.logit_adj_tau,
+                hierarchical=args.hierarchical,
+                num_geometric=args.num_geometric,
+                num_possessive=args.num_possessive,
+                num_semantic=args.num_semantic,
+                num_negatives=args.num_negatives,
+                super_weight=args.super_weight,
+                train_relation_head=args.train_head,
             )
 
             # Finetune callback
@@ -908,6 +951,7 @@ if __name__ == "__main__":
                 verbose=True,
                 mode="min",
             )
+            lr_monitor_callback = LearningRateMonitor(logging_interval="step")
 
             # Training
             trainer = Trainer(
@@ -916,7 +960,6 @@ if __name__ == "__main__":
                 devices=args.gpus,
                 accelerator="gpu",
                 max_epochs=args.max_epochs_finetune,
-                gpus=args.gpus,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
                 callbacks=[
@@ -932,7 +975,8 @@ if __name__ == "__main__":
             trainer.fit(module, ckpt_path=None)
 
         if trainer is not None:
-            torch.distributed.destroy_process_group()
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
             try:
                 os.chmod(tensorboard_logger.log_dir, 0o0777)
             except PermissionError as e:
