@@ -544,7 +544,7 @@ if __name__ == "__main__":
     # Training
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--accumulate", type=int, default=2)
-    parser.add_argument("--gpus", type=int, default=8)
+    parser.add_argument("--gpus", type=int, default=1)  # change to 1
     parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--max_epochs_finetune", type=int, default=25)
     parser.add_argument("--lr_backbone", type=float, default=2e-7)
@@ -581,6 +581,14 @@ if __name__ == "__main__":
     # Speed up
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--precision", type=int, default=32, choices=[16, 32])
+
+    parser.add_argument("--hierarchical", type=bool, default=False)
+    parser.add_argument("--num_geometric", type=int, default=15)
+    parser.add_argument("--num_possessive", type=int, default=11)
+    parser.add_argument("--num_semantic", type=int, default=24)
+    parser.add_argument("--num_negatives", type=int, default=49)
+    parser.add_argument("--super_weight", type=int, default=1)
+    parser.add_argument("--train_head", type=bool, default=False)
 
     args = parser.parse_args()
     if args.from_scratch:
