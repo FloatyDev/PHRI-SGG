@@ -53,6 +53,86 @@ class VGDataset(VGDetection):
         self.rel = rel[split]
         self.rel_categories = rel["rel_categories"][1:]  # remove 'no_relation' category
         self.num_object_queries = num_object_queries
+        self.super_relation_map = [
+            # 1-6: geometric
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            # 7: attached to -> semantic
+            2,
+            # 8: behind -> geometric
+            0,
+            # 9: belonging to -> possessive
+            1,
+            # 10: between -> geometric
+            0,
+            # 11-14: semantic
+            2,
+            2,
+            2,
+            2,
+            # 15: flying in -> semantic
+            2,
+            # 16-17: misc -> semantic
+            2,
+            2,
+            # 18-19: semantic
+            2,
+            2,
+            # 20: has -> possessive
+            1,
+            # 21: holding -> semantic (light_semantic_posession treated as semantic)
+            2,
+            # 22-23: geometric
+            0,
+            0,
+            # 24-27: semantic
+            2,
+            2,
+            2,
+            2,
+            # 28: mounted on -> semantic
+            2,
+            # 29: near -> geometric
+            0,
+            # 30: of -> possessive
+            1,
+            # 31-33: geometric
+            0,
+            0,
+            0,
+            # 34-35: semantic
+            2,
+            2,
+            # 36: part of -> possessive
+            1,
+            # 37-41: semantic
+            2,
+            2,
+            2,
+            2,
+            2,
+            # 42: to -> possessive
+            1,
+            # 43: under -> geometric
+            0,
+            # 44: using -> semantic (light_semantic_posession treated as semantic)
+            2,
+            # 45-47: semantic
+            2,
+            2,
+            2,
+            # 48-49: wearing -> semantic
+            2,
+            2,
+            # 50: with -> possessive
+            1,
+        ]
+
+        self.original_to_sorted_idx = self._create_relation_sorting()
 
     def __getitem__(self, idx):
         # read in PIL image and target in COCO format
