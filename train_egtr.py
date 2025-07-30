@@ -805,6 +805,7 @@ if __name__ == "__main__":
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"
     )
+    lr_monitor_callback = LearningRateMonitor(logging_interval="step")
 
     # Train
     trainer = None
@@ -838,7 +839,7 @@ if __name__ == "__main__":
             trainer.fit(module, ckpt_path=None)
 
             try:
-                os.chmod(logger.log_dir, 0o0777)
+                os.chmod(tensorboard_logger.log_dir, 0o0777)
             except PermissionError as e:
                 print(e)
 
