@@ -266,6 +266,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         self.head_dim = config.d_model // config.num_attention_heads
         self.layer_head = self.config.decoder_layers * config.num_attention_heads
 
+        # Frequency bias initialization
         if kwargs.get("fg_matrix", None) is not None:  # when training
             eps = config.freq_bias_eps
             fg_matrix = kwargs.get("fg_matrix", None)
