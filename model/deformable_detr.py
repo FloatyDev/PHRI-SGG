@@ -462,9 +462,7 @@ if is_scipy_available():
     from scipy.optimize import linear_sum_assignment
 
 if is_vision_available():
-    from transformers.models.detr.feature_extraction_detr import (
-        center_to_corners_format,
-    )
+    from transformers.image_transforms import center_to_corners_format
 
 if is_timm_available():
     from timm import create_model
