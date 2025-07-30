@@ -818,19 +818,24 @@ if __name__ == "__main__":
             # Training
             trainer = Trainer(
                 precision=args.precision,
-                logger=logger,
-                devices = args.gpus,
-                accelerator = "gpu",
+                logger=logger_list,
+                devices=args.gpus,
+                accelerator="gpu",
                 max_epochs=args.max_epochs,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
-                callbacks=[checkpoint_callback, early_stop_callback],
+                callbacks=[
+                    checkpoint_callback,
+                    early_stop_callback,
+                    lr_monitor_callback,
+                ],
                 accumulate_grad_batches=args.accumulate,
+                detect_anomaly=True,
             )
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Main training")
-            trainer.fit(module, ckpt_path=ckpt_path)
+            trainer.fit(module, ckpt_path=None)
 
             try:
                 os.chmod(logger.log_dir, 0o0777)
@@ -906,18 +911,24 @@ if __name__ == "__main__":
             # Training
             trainer = Trainer(
                 precision=args.precision,
-                logger=logger,
+                logger=logger_list,
+                devices=args.gpus,
+                accelerator="gpu",
                 max_epochs=args.max_epochs_finetune,
                 gpus=args.gpus,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
-                callbacks=[checkpoint_callback, early_stop_callback],
+                callbacks=[
+                    checkpoint_callback,
+                    early_stop_callback,
+                    lr_monitor_callback,
+                ],
                 accumulate_grad_batches=args.accumulate,
             )
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Finetune with smaller lr")
-            trainer.fit(module, ckpt_path=finetune_ckpt_path)
+            trainer.fit(module, ckpt_path=None)
 
         if trainer is not None:
             torch.distributed.destroy_process_group()
@@ -945,7 +956,11 @@ if __name__ == "__main__":
 
         # Eval
         trainer = Trainer(
-            precision=args.precision, logger=logger, gpus=1, max_epochs=-1
+            precision=args.precision,
+            logger=logger_list,
+            devices=args.gpus,
+            accelerator="gpu",
+            max_epochs=-1,
         )
         if "visual_genome" in args.data_path:
             test_dataset = VGDataset(
