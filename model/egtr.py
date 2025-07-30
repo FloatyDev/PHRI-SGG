@@ -510,10 +510,20 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         # Gated sum
         rel_gate = torch.sigmoid(self.rel_predictor_gate(relation_source))
         gated_relation_source = torch.mul(rel_gate, relation_source).sum(dim=-2)
-        pred_rel = self.rel_predictor(gated_relation_source)
+
+        if self.config.hierarchical:
+            # Hierarchical prediction uses (log softmax)
+            pred_rel = self.rel_predictor(gated_relation_source, logits)
+        else:
+            # Original flat prediction
+            pred_rel = self.rel_predictor(gated_relation_source)
+            pred_rel = pred_rel.sigmoid()
+        # Connectivity
+        pred_connectivity = self.connectivity_layer(gated_relation_source)
+        pred_connectivity = pred_connectivity.sigmoid()
 
         # from <Neural Motifs>
-        if self.config.use_freq_bias:
+        if self.config.use_freq_bias and not self.config.hierarchical:
             predicted_node = torch.argmax(logits, dim=-1)
             pred_rel += torch.stack(
                 [
@@ -523,8 +533,6 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 dim=0,
             )
 
-        # Connectivity
-        pred_connectivity = self.connectivity_layer(gated_relation_source)
         del gated_relation_source
         del relation_source
 
@@ -622,14 +630,10 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
 
         # from <structured sparse rcnn>, post-hoc logit adjustment.
         # reference: https://github.com/google-research/google-research/blob/master/logit_adjustment/main.py#L136-L140
-        if self.config.logit_adjustment:
+        if self.config.logit_adjustment and not self.hierarchical:
             pred_rel = pred_rel - self.config.logit_adj_tau * self.rel_dist.log().to(
                 pred_rel.device
             )
-
-        # Apply sigmoid to logits
-        pred_rel = pred_rel.sigmoid()
-        pred_connectivity = pred_connectivity.sigmoid()
 
         if not return_dict:
             if auxiliary_outputs is not None:
@@ -710,7 +714,6 @@ class SceneGraphGenerationLoss(nn.Module):
         self.matcher = matcher
         self.eos_coef = eos_coef
         self.losses = losses
-        self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
         self.rel_sample_negatives = rel_sample_negatives
         self.rel_sample_nonmatching = rel_sample_nonmatching
         self.model_training = model_training
@@ -729,6 +732,17 @@ class SceneGraphGenerationLoss(nn.Module):
         self.num_possessive = num_possessive
         self.num_semantic = num_semantic
         self.super_weight = super_weight
+
+        if hierarchical:
+            # Use NLLLoss for each relationship category
+            self.geo_loss = nn.NLLLoss(reduction="none")
+            self.poss_loss = nn.NLLLoss(reduction="none")
+            self.sem_loss = nn.NLLLoss(reduction="none")
+            self.super_loss = nn.NLLLoss(reduction="none")
+        else:
+            # Original BCEWithLogitsLoss for flat mode
+            self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
+
         self.connectivity_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
 
     def loss_labels(self, outputs, targets, indices, matching_costs, num_boxes):
@@ -905,9 +919,19 @@ class SceneGraphGenerationLoss(nn.Module):
                 ]
             )
 
-            pred_rel = outputs["pred_rel"][i, full_src_index][
-                :, full_src_index
-            ]  # [num_obj_queries, num_obj_queries, config.num_rel_labels]
+            if self.hierarchical:
+                # Unpack hierarchical predictions
+                pred_geo, pred_poss, pred_sem, pred_super, _ = outputs["pred_rel"]
+                pred_geo = pred_geo[i, full_src_index][:, full_src_index]
+                pred_poss = pred_poss[i, full_src_index][:, full_src_index]
+                pred_sem = pred_sem[i, full_src_index][:, full_src_index]
+                pred_super = pred_super[i, full_src_index][:, full_src_index]
+            else:
+                # flat prediction
+                pred_rel = outputs["pred_rel"][i, full_src_index][
+                    :, full_src_index
+                ]  # [num_obj_queries, num_obj_queries, config.num_rel_labels]
+
             target_rel = target["rel"][full_target_index][
                 :, full_target_index
             ]  # [num_obj_queries, num_obj_queries, config.num_rel_labels]
@@ -917,30 +941,292 @@ class SceneGraphGenerationLoss(nn.Module):
                 target_rel.shape[0], target_rel.shape[1], 1, device=target_rel.device
             )
             target_connect[rel_index[:, 0], rel_index[:, 1]] = 1
+
             pred_connectivity = outputs["pred_connectivity"][i, full_src_index][
                 :, full_src_index
             ]
+
+            # Connectivity loss
             loss = self.connectivity_loss(pred_connectivity, target_connect)
             connect_losses.append(loss)
-
-            if self.model_training:
-                loss = self._loss_relations(
-                    pred_rel,
-                    target_rel,
-                    full_matching_cost,
-                    self.rel_sample_negatives,
-                    self.rel_sample_nonmatching,
+            # Relationship loss
+            if self.hierarchical and "pred_rel" in outputs:
+                # Calculate hierarchical relationship losses
+                geo_loss, poss_loss, sem_loss, super_loss = (
+                    self._hierarchical_relation_loss(
+                        pred_geo,
+                        pred_poss,
+                        pred_sem,
+                        pred_super,
+                        target_rel,
+                        full_matching_cost,
+                    )
                 )
+                loss = geo_loss + poss_loss + sem_loss + self.super_weight * super_loss
             else:
-                loss = self._loss_relations(
-                    pred_rel, target_rel, full_matching_cost, None, None
-                )
+                # Original flat relationship loss
+                if self.model_training:
+                    loss = self._loss_relations(
+                        pred_rel,
+                        target_rel,
+                        full_matching_cost,
+                        self.rel_sample_negatives,
+                        self.rel_sample_nonmatching,
+                    )
+                else:
+                    loss = self._loss_relations(
+                        pred_rel, target_rel, full_matching_cost, None, None
+                    )
             losses.append(loss)
-        losses = {
-            "loss_rel": torch.cat(losses).mean(),
+
+        return {
+            "loss_rel": torch.stack(
+                losses
+            ).mean(),  # maybe use cat and ajdust dimension of loss.view(-1)/loss.unsqueeze(-1)
             "loss_connectivity": torch.stack(connect_losses).mean(),
         }
-        return losses
+
+    def _select_relation_indices(
+        self,
+        pred_rel,
+        target_rel,
+        matching_cost,
+        nonmatching_cost,
+        rel_sample_negatives,
+        rel_sample_nonmatching,
+        largest_neg,
+        largest_non,
+    ):
+        """
+        Returns:
+            relation_indices  – (M, 3) LongTensor with [i,j,k] triplets
+            weight            – (M,)   FloatTensor with (1-u_i)(1-u_j)
+        """
+
+        device = pred_rel.device
+        matched = matching_cost != nonmatching_cost
+
+        N, _, R = pred_rel.shape
+        num_obj = int(matched.sum())
+
+        true_idx = (target_rel[:num_obj, :num_obj, :] == 1).nonzero(as_tuple=False)
+
+        false_idx = (target_rel[:num_obj, :num_obj, :] != 1).nonzero(as_tuple=False)
+
+        nonmatch_mask = torch.outer(matched, matched)  # N,N bool
+        nonmatch_idx = (
+            nonmatch_mask.unsqueeze(-1).expand(N, N, R).nonzero(as_tuple=False)
+        )
+
+        num_true = len(true_idx)
+
+        # subsample false / non-match
+        def _sample(idx, k_mult, largest):
+            if not k_mult or num_true == 0 or idx.numel() == 0:
+                return torch.empty(0, 3, dtype=torch.long, device=device)
+
+            k = min(k_mult * num_true, idx.shape[0])
+
+            if k == 0:
+                return torch.empty(0, 3, dtype=torch.long, device=device)
+
+            if largest:
+                scores = pred_rel[idx[:, 0], idx[:, 1], idx[:, 2]]
+                keep = torch.topk(scores, k, largest=True).indices
+                return idx[keep]
+
+            # random
+            rand = torch.randperm(idx.shape[0], device=device)[:k]
+            return idx[rand]
+
+        false_idx = _sample(false_idx, rel_sample_negatives, largest_neg)
+        nonmatch_idx = _sample(nonmatch_idx, rel_sample_nonmatching, largest_non)
+
+        relation_idx = torch.cat([true_idx, false_idx, nonmatch_idx], dim=0)
+
+        # adaptive-smoothing weight
+        u = matching_cost.sigmoid()  # (N,)
+        weights = (1 - u[relation_idx[:, 0]]) * (1 - u[relation_idx[:, 1]])
+
+        return relation_idx, weights
+
+    def class_to_super(self, relation_tensor):
+        """
+        Maps relationship indices to super-relationship categories
+        (0: geometric, 1: possessive, 2: semantic)
+
+        Input: relation_tensor - tensor of relationship indices
+        Output: tensor of super-relationship indices (0, 1, or 2)
+        """
+        # Define the mapping from relationship to super-relationship
+        # Based on Visual Genome relationship hierarchy
+        super_relation_map = [
+            # 1-6: geometric
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            # 7: attached to -> semantic
+            2,
+            # 8: behind -> geometric
+            0,
+            # 9: belonging to -> possessive
+            1,
+            # 10: between -> geometric
+            0,
+            # 11-14: semantic
+            2,
+            2,
+            2,
+            2,
+            # 15: flying in -> semantic
+            2,
+            # 16-17: misc -> semantic
+            2,
+            2,
+            # 18-19: semantic
+            2,
+            2,
+            # 20: has -> possessive
+            1,
+            # 21: holding -> semantic (light_semantic_posession treated as semantic)
+            2,
+            # 22-23: geometric
+            0,
+            0,
+            # 24-27: semantic
+            2,
+            2,
+            2,
+            2,
+            # 28: mounted on -> semantic
+            2,
+            # 29: near -> geometric
+            0,
+            # 30: of -> possessive
+            1,
+            # 31-33: geometric
+            0,
+            0,
+            0,
+            # 34-35: semantic
+            2,
+            2,
+            # 36: part of -> possessive
+            1,
+            # 37-41: semantic
+            2,
+            2,
+            2,
+            2,
+            2,
+            # 42: to -> possessive
+            1,
+            # 43: under -> geometric
+            0,
+            # 44: using -> semantic (light_semantic_posession treated as semantic)
+            2,
+            # 45-47: semantic
+            2,
+            2,
+            2,
+            # 48-49: wearing -> semantic
+            2,
+            2,
+            # 50: with -> possessive
+            1,
+        ]
+
+        # Convert to tensor on the same device
+        super_map = torch.tensor(
+            super_relation_map, dtype=torch.long, device=relation_tensor.device
+        )
+        # Apply mapping
+        return super_map[relation_tensor]
+
+    def _hierarchical_relation_loss(
+        self,
+        pred_geo,
+        pred_poss,
+        pred_sem,  # (N,N,g) (N,N,p) (N,N,s) logits
+        pred_super,  # (N,N,3)           logits
+        target_rel,  # (N,N,R)           one-hot
+        matching_cost,  # (N,)              Hungarian cost
+        rel_sample_negatives=None,
+        rel_sample_nonmatching=None,
+    ):
+        """
+        Returns four scalars (geo, poss, sem, super) **per image**.
+        Sampling parameters default to `self.rel_sample_negatives` … if you
+        keep the call-site unchanged.
+        """
+
+        tgt_geo = target_rel[..., : self.num_geometric]
+        tgt_poss = target_rel[
+            ..., self.num_geometric : self.num_geometric + self.num_possessive
+        ]
+        tgt_sem = target_rel[..., self.num_geometric + self.num_possessive :]
+
+        w_obj = 1.0 - matching_cost.sigmoid()
+        w_pair = torch.outer(w_obj, w_obj)  # NxN
+
+        # super-relation loss
+        mask_rel = target_rel.sum(-1) > 0
+        if mask_rel.any():
+            rel_idx = target_rel[mask_rel].argmax(-1)
+            super_tgt = self.class_to_super(rel_idx)  # 0/1/2
+
+            super_loss_vec = self.super_loss(pred_super[mask_rel], super_tgt)
+            super_loss = (
+                super_loss_vec * w_pair[mask_rel]
+            ).mean()  # weight with uncertainty of adaptive-smoothing post-loss
+        else:
+            super_loss = (pred_super * 0).sum()
+
+        if self.rel_sample_negatives is None and self.rel_sample_nonmatching is None:
+
+            def _loss(pred, tgt, loss_fn):
+                mask = tgt.sum(-1) > 0  # (N,N) bool
+                if not mask.any():
+                    return (pred * 0).sum()  # keep 0 gradient without detaching
+
+                cls_ind = tgt[mask].argmax(-1)
+                loss_vec = loss_fn(pred[mask], cls_ind)
+                weight = w_pair[mask]
+
+                return (loss_vec * weight).mean()
+
+            geo_loss = _loss(pred_geo, tgt_geo, self.geo_loss)
+            poss_loss = _loss(pred_poss, tgt_poss, self.poss_loss)
+            sem_loss = _loss(pred_sem, tgt_sem, self.sem_loss)
+            return geo_loss, poss_loss, sem_loss, super_loss
+
+        def _sampled_loss_family(pred, tgt, loss_fn):
+            idx, w = self._select_relation_indices(
+                pred,
+                tgt,
+                matching_cost,
+                self.nonmatching_cost,
+                rel_sample_negatives,
+                rel_sample_nonmatching,
+                self.rel_sample_negatives_largest,
+                self.rel_sample_nonmatching_largest,
+            )
+            if idx.numel() == 0:
+                return (pred * 0).sum()  # keep 0 gradient without detaching
+
+            logits = pred[idx[:, 0], idx[:, 1]]  # (M, C_fam)
+            c = tgt[idx[:, 0], idx[:, 1]].argmax(-1)  # (M,)
+
+            return (loss_fn(logits, c) * w).mean()
+
+        geo_loss = _sampled_loss_family(pred_geo, tgt_geo, self.geo_loss)
+        poss_loss = _sampled_loss_family(pred_poss, tgt_poss, self.poss_loss)
+        sem_loss = _sampled_loss_family(pred_sem, tgt_sem, self.sem_loss)
+
+        return geo_loss, poss_loss, sem_loss, super_loss
 
     def _loss_relations(
         self,
@@ -1045,7 +1331,9 @@ class SceneGraphGenerationLoss(nn.Module):
             ]
 
             weight = 1.0 - matching_cost.sigmoid()
-            weight = weight[relation_indices[:, 0]] * weight[relation_indices[:, 1]]
+            weight = (
+                weight[relation_indices[:, 0]] * weight[relation_indices[:, 1]]
+            )  # (1-u_sub)(1-u_obj)
             target_rel = target_rel * weight
             loss = self.rel_loss(pred_rel, target_rel)
         return loss
