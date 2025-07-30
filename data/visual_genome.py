@@ -5,6 +5,7 @@
 import json
 import os
 
+import ipdb
 import numpy as np
 import torch
 import torchvision
@@ -67,16 +68,41 @@ class VGDataset(VGDetection):
         pixel_values = encoding["pixel_values"].squeeze()  # remove batch dimension
         target = encoding["labels"][0]  # remove batch dimension
         rel = np.array(rel_list)
+
         target["rel"] = self._get_rel_tensor(rel)
         target["class_labels"] -= 1
+
         return pixel_values, target
+
+    def _create_relation_sorting(self):
+
+        indexed_supers = []
+        for original_idx in range(50):
+            super_val = self.super_relation_map[original_idx]
+            indexed_supers.append((original_idx, super_val))
+
+        indexed_supers.sort(key=lambda x: (x[1], x[0]))
+
+        # Create mapping from original index to sorted position
+        return {
+            original_idx: sorted_idx
+            for sorted_idx, (original_idx, _) in enumerate(indexed_supers)
+        }
 
     def _get_rel_tensor(self, rel_tensor):
         indices = rel_tensor.T
         indices[-1, :] -= 1  # remove 'no_relation' category
 
         rel = torch.zeros([self.num_object_queries, self.num_object_queries, 50])
-        rel[indices[0, :], indices[1, :], indices[2, :]] = 1.0
+
+        # map each relation to sorted position
+        for i in range(indices.shape[1]):
+            orig_rel_idx = indices[2, i]
+            sorted_idx = self.original_to_sorted_idx[orig_rel_idx]
+            s = indices[0, i]
+            o = indices[1, i]
+            rel[s, o, sorted_idx] = 1.0
+
         return rel
 
 
