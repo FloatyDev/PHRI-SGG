@@ -224,6 +224,13 @@ class SGG(pl.LightningModule):
         connectivity_loss_coefficient,
         logit_adjustment,
         logit_adj_tau,
+        hierarchical,
+        num_geometric,
+        num_possessive,
+        num_semantic,
+        num_negatives,
+        super_weight,
+        train_relation_head=False,
     ):
 
         super().__init__()
@@ -251,6 +258,15 @@ class SGG(pl.LightningModule):
 
         config.logit_adjustment = logit_adjustment
         config.logit_adj_tau = logit_adj_tau
+
+        # Hierarchical plug-in additions
+        config.hierarchical = hierarchical
+        config.num_geometric = num_geometric
+        config.num_possessive = num_possessive
+        config.num_semantic = num_semantic
+        config.num_negatives = num_negatives
+        config.super_weight = super_weight
+
         self.config = config
 
         if config.from_scratch:

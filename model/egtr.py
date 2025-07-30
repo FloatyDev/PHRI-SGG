@@ -442,6 +442,11 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 focal_alpha=self.config.focal_alpha,
                 rel_sample_negatives_largest=self.config.rel_sample_negatives_largest,
                 rel_sample_nonmatching_largest=self.config.rel_sample_nonmatching_largest,
+                hierarchical=self.config.hierarchical,
+                num_geometric=self.config.num_geometric,
+                num_possessive=self.config.num_possessive,
+                num_semantic=self.config.num_semantic,
+                super_weight=self.config.super_weight,
             )
 
             criterion.to(self.device)
@@ -563,6 +568,12 @@ class SceneGraphGenerationLoss(nn.Module):
         focal_alpha,
         rel_sample_negatives_largest,
         rel_sample_nonmatching_largest,
+        # Add hierarchical parameters
+        hierarchical=False,
+        num_geometric=15,
+        num_possessive=11,
+        num_semantic=24,
+        super_weight=1.0,  # weight of super relation at general rel loss sum
     ):
         """
         Create the criterion.
@@ -601,6 +612,12 @@ class SceneGraphGenerationLoss(nn.Module):
             + 2 * matcher.giou_cost
             - torch.log(torch.tensor((1.0 / smoothing) - 1.0))
         )  # set minimum bipartite matching costs for nonmatched object queries
+
+        self.hierarchical = hierarchical
+        self.num_geometric = num_geometric
+        self.num_possessive = num_possessive
+        self.num_semantic = num_semantic
+        self.super_weight = super_weight
         self.connectivity_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
 
     def loss_labels(self, outputs, targets, indices, matching_costs, num_boxes):
