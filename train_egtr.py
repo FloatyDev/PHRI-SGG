@@ -5,6 +5,9 @@
 import argparse
 import json
 import os
+from torch.cuda import is_initialized
+import wandb
+
 from glob import glob
 from pathlib import Path
 
@@ -12,9 +15,9 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from torch.utils.data import DataLoader
@@ -38,7 +41,9 @@ from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
 
 seed_everything(42, workers=True)
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+torch.set_float32_matmul_precision("medium")
+
 
 # Reference: https://github.com/yuweihao/KERN/blob/master/models/eval_rels.py
 def evaluate_batch(
@@ -736,13 +741,18 @@ if __name__ == "__main__":
         version = None  #  If version is not specified the logger inspects the save directory for existing versions, then automatically assigns the next available version.
 
     # Trainer setting
-    logger = TensorBoardLogger(save_dir, name=name, version=version)
-    if os.path.exists(f"{logger.log_dir}/checkpoints"):
-        if os.path.exists(f"{logger.log_dir}/checkpoints/last.ckpt"):
-            ckpt_path = f"{logger.log_dir}/checkpoints/last.ckpt"
+    tensorboard_logger = TensorBoardLogger(save_dir, name=name, version=version)
+
+    # initialize wandblogger
+    wandb_logger = WandbLogger(project="hier-egtr", log_model="all", save_dir="./logs")
+
+    logger_list = [tensorboard_logger, wandb_logger]
+    if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints"):
+        if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints/last.ckpt"):
+            ckpt_path = f"{tensorboard_logger.log_dir}/checkpoints/last.ckpt"
         else:
             ckpt_path = sorted(
-                glob(f"{logger.log_dir}/checkpoints/epoch=*.ckpt"),
+                glob(f"{tensorboard_logger.log_dir}/checkpoints/epoch=*.ckpt"),
                 key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
             )[-1]
     else:
@@ -829,7 +839,7 @@ if __name__ == "__main__":
 
         if args.finetune:
             ckpt_path = sorted(  # load best model
-                glob(f"{logger.log_dir}/checkpoints/epoch=*.ckpt"),
+                glob(f"{tensorboard_logger.log_dir}/checkpoints/epoch=*.ckpt"),
                 key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
             )[-1]
 
@@ -912,7 +922,7 @@ if __name__ == "__main__":
         if trainer is not None:
             torch.distributed.destroy_process_group()
             try:
-                os.chmod(logger.log_dir, 0o0777)
+                os.chmod(tensorboard_logger.log_dir, 0o0777)
             except PermissionError as e:
                 print(e)
 
@@ -925,7 +935,7 @@ if __name__ == "__main__":
 
         # Load best model
         ckpt_path = sorted(
-            glob(f"{logger.log_dir}/checkpoints/epoch=*.ckpt"),
+            glob(f"{tensorboard_logger.log_dir}/checkpoints/epoch=*.ckpt"),
             key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
         )[-1]
         state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
