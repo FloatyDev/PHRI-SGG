@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.models.detr.feature_extraction_detr import center_to_corners_format
+from transformers.image_transforms import center_to_corners_format
 from transformers.utils import ModelOutput
 
 from .deformable_detr import (
@@ -117,6 +117,106 @@ class DetrSceneGraphGenerationOutput(ModelOutput):
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+
+class BayesianRelationClassifier(nn.Module):
+    """
+    Modified hierarchical classifier for 4D gated_relation_source features
+    Maintains (bsz, num_queries, num_queries) structure
+    """
+
+    def __init__(
+        self,
+        input_dim=256,  # Should match 2 * d_model
+        num_classes=150,
+        num_super_classes=17,
+        num_geometric=15,
+        num_possessive=11,
+        num_semantic=24,
+        T1=1,
+        T2=1,
+        T3=1,
+    ):
+        super(BayesianRelationClassifier, self).__init__()
+        self.input_dim = input_dim
+        self.num_classes = num_classes
+        self.num_super_classes = num_super_classes
+
+        # Feature processor (operates on last dimension)
+        self.feature_processor = nn.Sequential(
+            nn.Linear(input_dim, 1024),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+        )
+
+        # Class embeddings (maintain spatial dimensions)
+        self.class_embed = nn.Embedding(num_classes, 64)
+
+        # Prediction heads
+        self.fc2 = nn.Sequential(
+            nn.Linear(512 + 64 * 2, 512),  # 512 + class emb
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+        )
+
+        # Relationship heads
+        self.fc3_1 = nn.Linear(512, num_geometric)
+        self.fc3_2 = nn.Linear(512, num_possessive)
+        self.fc3_3 = nn.Linear(512, num_semantic)
+        self.fc5 = nn.Linear(512, 3)  # Super relation
+
+        self.T1 = T1
+        self.T2 = T2
+        self.T3 = T3
+
+    def forward(
+        self,
+        features,  # gated_relation_source: (bsz, N, N, feat_dim)
+        det_logits,  # class logits: (bsz, N, num_classes)
+    ):
+        _, N, _, _ = features.shape
+
+        emb = self.class_embed.weight
+
+        class_prob = det_logits.softmax(-1)
+
+        soft_emb = torch.matmul(class_prob, emb)  # (bsz,N,64)
+        # Embed class information
+        c1_emb = soft_emb.unsqueeze(2).expand(-1, -1, N, -1)  # subject
+        c2_emb = soft_emb.unsqueeze(1).expand(-1, N, -1, -1)  # object
+
+        # Process features (operates on last dimension)
+        h = self.feature_processor(features)  # (bsz, N, N, 512)
+
+        # Combine features and embeddings
+        combined = torch.cat([h, c1_emb, c2_emb], dim=-1)  # (bsz, N, N, 512+64+64)
+
+        hc = self.fc2(combined)  # (bsz, N, N, 512)
+
+        # Compute outputs
+        super_relation = F.log_softmax(self.fc5(hc), dim=-1)  # (bsz, N, N, 3)
+
+        # Compute hierarchical relationships
+        relation_1 = (
+            F.log_softmax(self.fc3_1(hc) / self.T1, dim=-1) + super_relation[..., 0:1]
+        )
+        relation_2 = (
+            F.log_softmax(self.fc3_2(hc) / self.T2, dim=-1) + super_relation[..., 1:2]
+        )
+        relation_3 = (
+            F.log_softmax(self.fc3_3(hc) / self.T3, dim=-1) + super_relation[..., 2:3]
+        )
+
+        return (
+            relation_1,  # (bsz, N, N, num_geometric)
+            relation_2,  # (bsz, N, N, num_possessive)
+            relation_3,  # (bsz, N, N, num_semantic)
+            super_relation,  # (bsz, N, N, 3)
+            hc,  # (bsz, N, N, 512) - intermediate features
+        )
 
 
 class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
@@ -209,12 +309,23 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         self.final_obj_proj = nn.Linear(config.d_model, config.d_model)
 
         self.rel_predictor_gate = nn.Linear(2 * config.d_model, 1)
-        self.rel_predictor = DeformableDetrMLPPredictionHead(
-            input_dim=2 * config.d_model,
-            hidden_dim=config.d_model,
-            output_dim=config.num_rel_labels,
-            num_layers=3,
-        )
+
+        if self.config.hierarchical:
+            self.rel_predictor = BayesianRelationClassifier(
+                input_dim=2 * config.d_model,
+                num_classes=config.num_labels,
+                num_geometric=config.num_geometric,
+                num_possessive=config.num_possessive,
+                num_semantic=config.num_semantic,
+            )
+        else:
+            self.rel_predictor = DeformableDetrMLPPredictionHead(
+                input_dim=2 * config.d_model,
+                hidden_dim=config.d_model,
+                output_dim=config.num_rel_labels,
+                num_layers=3,
+            )
+
         self.connectivity_layer = DeformableDetrMLPPredictionHead(
             input_dim=2 * config.d_model,
             hidden_dim=config.d_model,
