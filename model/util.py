@@ -173,3 +173,17 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
     else:
         raise ValueError("Only 3-dimensional tensors are supported")
     return NestedTensor(tensor, mask)
+
+
+def count_trainable(model, debugging=False):
+    """
+    Return total #trainable parameters.
+    Used for debugging
+    """
+    trainable = [(n, p.numel()) for n, p in model.named_parameters() if p.requires_grad]
+    total = sum(n_params for _, n_params in trainable)
+
+    if debugging:
+        print(f"trainable params: {total:,}  ({total/1e6:.2f} M)")
+
+    return total

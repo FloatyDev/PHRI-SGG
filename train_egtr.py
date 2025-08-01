@@ -5,8 +5,6 @@
 import argparse
 import json
 import os
-from torch.cuda import is_initialized
-import wandb
 
 from glob import glob
 from pathlib import Path
@@ -39,6 +37,7 @@ from model.deformable_detr import (
 from model.egtr import DetrForSceneGraphGeneration
 from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
+from model.util import count_trainable
 
 seed_everything(42, workers=True)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -236,6 +235,7 @@ class SGG(pl.LightningModule):
         num_negatives,
         super_weight,
         train_relation_head=False,
+        artifact_path="",
     ):
 
         super().__init__()
@@ -282,25 +282,35 @@ class SGG(pl.LightningModule):
             )
             self.initialized_keys = []
         else:
+            # Load trained object detector
             self.model, load_info = DetrForSceneGraphGeneration.from_pretrained(
                 pretrained,
                 config=config,
                 ignore_mismatched_sizes=True,
                 output_loading_info=True,
                 fg_matrix=fg_matrix,
-                ignore_keys=[r"^model\.rel_predictor\..*"],
             )
             self.initialized_keys = load_info["missing_keys"] + [
                 _key for _key, _, _ in load_info["mismatched_keys"]
             ]
-        if main_trained:
-            state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
+        # only train relation_head
+        if train_relation_head and not main_trained:
+            # load trained egtr weights
+            assert artifact_path, "have to give artifact_path"
+            ckpt_path = sorted(
+                glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
+                key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
+            )[-1]
+            state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
             for k in list(state_dict.keys()):
-                state_dict[k[6:]] = state_dict.pop(k)  # "model."
+                if k.startswith("model.rel_predictor."):
+                    print(f"----deleting {k}")
+                    del state_dict[k]
+                else:
+                    state_dict[k[6:]] = state_dict.pop(k)  # "model."
+
             self.model.load_state_dict(state_dict, strict=False)
 
-        # only train relation_head
-        if train_relation_head:
             # disable all parameters and enable training only the relation head
             for p in self.model.parameters():
                 p.requires_grad = False
@@ -308,10 +318,10 @@ class SGG(pl.LightningModule):
             # enable the layers that must learn
             allow = (
                 "rel_predictor.",  # hierarchical head
-                "proj_q",  # optional: query projection
-                "proj_k",  # optional: key   projection
-                "final_sub_proj",  # keeps sub-object embeddings in sync
-                "final_obj_proj",  # keeps object embeddings in sync
+                # "proj_q",  # query projection
+                # "proj_k",  # key projection
+                # "final_sub_proj",  # keeps sub-object embeddings in sync
+                # "final_obj_proj",  # keeps object embeddings in sync
                 "rel_predictor_gate",  # tiny gate mlp, if you use it
             )
 
@@ -322,12 +332,21 @@ class SGG(pl.LightningModule):
             trainable = [n for n, p in self.model.named_parameters() if p.requires_grad]
             unexpected = [n for n in trainable if not n.startswith(allow)]
 
+            count_trainable(model=self.model, debugging=True)
+
             assert not unexpected, (
                 f"[sgg] unexpected trainable parameters:\n  {unexpected[:10]}… "
                 f"(total {len(unexpected)})"
             )
 
             print(f"[sgg] trainable parameter count: {len(trainable)}")
+
+        if main_trained:
+            state_dict = torch.load(main_trained, map_location="cpu")["state_dict"]
+            for k in list(state_dict.keys()):
+                state_dict[k[6:]] = state_dict.pop(k)  # "model."
+            self.model.load_state_dict(state_dict, strict=False)
+
         # see https://github.com/PyTorchLightning/pytorch-lightning/pull/1896
         self.lr = lr
         self.lr_backbone = lr_backbone
@@ -606,7 +625,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", type=str2bool, default=False)
     parser.add_argument("--resume", type=str2bool, default=True)
     parser.add_argument("--memo", type=str, default="")
-    parser.add_argument("--version", type=int, default=0)
+    parser.add_argument("--version", type=int, default=1)
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument("--finetune", type=str2bool, default=True)
 
@@ -639,6 +658,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_negatives", type=int, default=49)
     parser.add_argument("--super_weight", type=int, default=1)
     parser.add_argument("--train_head", type=bool, default=False)
+    parser.add_argument("--artifact_path", type=str, default="")
 
     args = parser.parse_args()
     if args.from_scratch:
@@ -786,7 +806,6 @@ if __name__ == "__main__":
             )[-1]
     else:
         ckpt_path = None
-
     # Module
     module = SGG(
         architecture=args.architecture,
@@ -830,6 +849,7 @@ if __name__ == "__main__":
         num_negatives=args.num_negatives,
         super_weight=args.super_weight,
         train_relation_head=args.train_head,
+        artifact_path=args.artifact_path,
     )
 
     # Callback
