@@ -157,6 +157,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_batch_size", type=int, default=1)
     parser.add_argument("--eval_single_preds", type=str2bool, default=True)
     parser.add_argument("--eval_multiple_preds", type=str2bool, default=False)
+    parser.add_argument("--ckpt", type=str, default="")
 
     parser.add_argument("--logit_adjustment", type=str2bool, default=False)
     parser.add_argument("--logit_adj_tau", type=float, default=0.3)
@@ -168,8 +169,8 @@ if __name__ == "__main__":
 
     # Speed up
     parser.add_argument("--num_workers", type=int, default=4)
-    # Hierarchical 
-    parser.add_argument("--hier", type=bool,default=False)
+    # Hierarchical
+    parser.add_argument("--hier", type=bool, default=False)
     args, unknown = parser.parse_known_args()  # to ignore args when training
 
     # Feature extractor
@@ -232,17 +233,26 @@ if __name__ == "__main__":
     model = DetrForSceneGraphGeneration.from_pretrained(
         args.architecture, config=config, ignore_mismatched_sizes=True
     )
-    ckpt_path = sorted(
-        glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
-        key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-    )[-1]
-    state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
+
+    if args.ckpt:
+        ckpt_to_load = args.ckpt
+    else:
+        assert args.artifact_path, "--artifact_path is required when a ckpt_path is not given explicitely"
+        ckpt_to_load = sorted(
+            glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
+            key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
+        )[-1]
+
+    state_dict = torch.load(ckpt_to_load, map_location="cpu")["state_dict"]
     for k in list(state_dict.keys()):
         state_dict[k[6:]] = state_dict.pop(k)  # "model."
 
-    model.load_state_dict(state_dict)
+    missing, unexpected = model.load_state_dict(state_dict)
+    print(
+        f"✓ loaded {ckpt_to_load}  "
+        f"({len(unexpected)} unexpected • {len(missing)} missing)"
+    )
     model.cuda()
-    model.eval()
 
     # FPS
     if args.infer_only:
@@ -262,7 +272,7 @@ if __name__ == "__main__":
 
         # Save eval metric
         device = "".join(torch.cuda.get_device_name(0).split()[1:2])
-        filename = f'{ckpt_path.replace(".ckpt", "")}__{args.split}__{len(test_dataloader)}__{device}'
+        filename = f'{ckpt_to_load.replace(".ckpt", "")}__{args.split}__{len(test_dataloader)}__{device}'
         if args.logit_adjustment:
             filename += f"__la_{args.logit_adj_tau}"
         metric["eval_arg"] = args.__dict__
