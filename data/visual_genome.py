@@ -53,6 +53,9 @@ class VGDataset(VGDetection):
         self.rel = rel[split]
         self.rel_categories = rel["rel_categories"][1:]  # remove 'no_relation' category
         self.num_object_queries = num_object_queries
+        self.num_geometric = 15
+        self.num_possessive = 11
+        self.num_semantic = 24
         self.super_relation_map = [
             # 1-6: geometric
             0,
@@ -76,16 +79,16 @@ class VGDataset(VGDetection):
             2,
             # 15: flying in -> semantic
             2,
-            # 16-17: misc -> semantic
-            2,
-            2,
+            # 16-17: misc -> possessive
+            1,
+            1,
             # 18-19: semantic
             2,
             2,
             # 20: has -> possessive
             1,
-            # 21: holding -> semantic (light_semantic_posession treated as semantic)
-            2,
+            # 21: holding -> semantic (light_semantic_posession treated as possessive)
+            1,
             # 22-23: geometric
             0,
             0,
@@ -93,7 +96,7 @@ class VGDataset(VGDetection):
             2,
             2,
             2,
-            2,
+            1, # made of -> possessive
             # 28: mounted on -> semantic
             2,
             # 29: near -> geometric
@@ -119,8 +122,8 @@ class VGDataset(VGDetection):
             1,
             # 43: under -> geometric
             0,
-            # 44: using -> semantic (light_semantic_posession treated as semantic)
-            2,
+            # 44: using -> possessive (light_semantic_posession treated as semantic)
+            1,
             # 45-47: semantic
             2,
             2,
@@ -175,13 +178,16 @@ class VGDataset(VGDetection):
 
         rel = torch.zeros([self.num_object_queries, self.num_object_queries, 50])
 
-        # map each relation to sorted position
-        for i in range(indices.shape[1]):
-            orig_rel_idx = indices[2, i]
-            sorted_idx = self.original_to_sorted_idx[orig_rel_idx]
-            s = indices[0, i]
-            o = indices[1, i]
-            rel[s, o, sorted_idx] = 1.0
+        ## map each relation to sorted position
+        #for i in range(indices.shape[1]):
+        #    orig_rel_idx = indices[2, i]
+        #    sorted_idx = self.original_to_sorted_idx[orig_rel_idx]
+        #    s = indices[0, i]
+        #    o = indices[1, i]
+        #    rel[s, o, sorted_idx] = 1.0
+
+        # map each relation to original position
+        rel[indices[0, :], indices[1, :], indices[2, :]] = 1.0
 
         return rel
 
