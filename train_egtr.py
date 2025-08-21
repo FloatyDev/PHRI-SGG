@@ -887,12 +887,13 @@ if __name__ == "__main__":
                     lr_monitor_callback,
                 ],
                 accumulate_grad_batches=args.accumulate,
-                detect_anomaly=True,
             )
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Main training")
-            trainer.fit(module, ckpt_path=None)
+            if ckpt_path is not None:
+                print(f"### Resume training from {ckpt_path}")
+            trainer.fit(module, ckpt_path=ckpt_path) # no resume
 
             try:
                 os.chmod(tensorboard_logger.log_dir, 0o0777)
