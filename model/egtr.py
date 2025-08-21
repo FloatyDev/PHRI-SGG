@@ -29,6 +29,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import ipdb
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -127,39 +128,35 @@ class BayesianRelationClassifier(nn.Module):
 
     def __init__(
         self,
-        input_dim=256,  # Should match 2 * d_model
+        input_dim=512,  # Should match 2 * d_model
         num_classes=150,
-        num_super_classes=17,
         num_geometric=15,
         num_possessive=11,
         num_semantic=24,
+        class_embed_dim=64,
         T1=1,
         T2=1,
         T3=1,
+        use_class_context=False,
     ):
         super(BayesianRelationClassifier, self).__init__()
         self.input_dim = input_dim
         self.num_classes = num_classes
-        self.num_super_classes = num_super_classes
-
-        # Feature processor (operates on last dimension)
-        self.feature_processor = nn.Sequential(
-            nn.Linear(input_dim, 1024),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-        )
-
-        # Class embeddings (maintain spatial dimensions)
-        self.class_embed = nn.Embedding(num_classes, 64)
+        self.use_class_context = use_class_context
+        if use_class_context:
+            self.class_embed = nn.Embedding(num_classes, class_embed_dim)
+            fused_dim = input_dim + 2 * class_embed_dim
+        else:
+            fused_dim = input_dim
 
         # Prediction heads
-        self.fc2 = nn.Sequential(
-            nn.Linear(512 + 64 * 2, 512),  # 512 + class emb
+        self.shared_fc = nn.Sequential(
+            nn.Linear(fused_dim, 512),  # 512 + class emb
             nn.ReLU(),
             nn.Dropout(p=0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
         )
 
         # Relationship heads
@@ -177,38 +174,35 @@ class BayesianRelationClassifier(nn.Module):
         features,  # gated_relation_source: (bsz, N, N, feat_dim)
         det_logits,  # class logits: (bsz, N, num_classes)
     ):
-        _, N, _, _ = features.shape
+        B, N, _, D = features.shape
+        if self.use_class_context:
+            with torch.no_grad():
+                class_prob = det_logits.softmax(-1)
+            emb = self.class_embed.weight
 
-        emb = self.class_embed.weight
+            soft_emb = torch.matmul(class_prob, emb)  # (bsz,N,64)
+            ## Embed class information
+            c1_emb = soft_emb.unsqueeze(2).expand(B, N, N, -1)  # subject
+            c2_emb = soft_emb.unsqueeze(1).expand(B, N, N, -1)  # object
+            ## Combine features and embeddings
+            combined = torch.cat(
+                [features, c1_emb, c2_emb], dim=-1
+            )  # (bsz, N, N, 512+2*class_embed_dim)
+        else:
+            combined = features
 
-        class_prob = det_logits.softmax(-1)
-
-        soft_emb = torch.matmul(class_prob, emb)  # (bsz,N,64)
-        # Embed class information
-        c1_emb = soft_emb.unsqueeze(2).expand(-1, -1, N, -1)  # subject
-        c2_emb = soft_emb.unsqueeze(1).expand(-1, N, -1, -1)  # object
-
-        # Process features (operates on last dimension)
-        h = self.feature_processor(features)  # (bsz, N, N, 512)
-
-        # Combine features and embeddings
-        combined = torch.cat([h, c1_emb, c2_emb], dim=-1)  # (bsz, N, N, 512+64+64)
-
-        hc = self.fc2(combined)  # (bsz, N, N, 512)
+        ## Process features (operates on last dimension)
+        hc = self.shared_fc(combined)  # (bsz, N, N, 512)
 
         # Compute outputs
         super_relation = F.log_softmax(self.fc5(hc), dim=-1)  # (bsz, N, N, 3)
 
         # Compute hierarchical relationships
-        relation_1 = (
-            F.log_softmax(self.fc3_1(hc) / self.T1, dim=-1) + super_relation[..., 0:1]
-        )
-        relation_2 = (
-            F.log_softmax(self.fc3_2(hc) / self.T2, dim=-1) + super_relation[..., 1:2]
-        )
-        relation_3 = (
-            F.log_softmax(self.fc3_3(hc) / self.T3, dim=-1) + super_relation[..., 2:3]
-        )
+        relation_1 = F.log_softmax(self.fc3_1(hc) / self.T1, dim=-1)
+
+        relation_2 = F.log_softmax(self.fc3_2(hc) / self.T2, dim=-1)
+
+        relation_3 = F.log_softmax(self.fc3_3(hc) / self.T3, dim=-1)
 
         return (
             relation_1,  # (bsz, N, N, num_geometric)
@@ -518,10 +512,8 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         else:
             # Original flat prediction
             pred_rel = self.rel_predictor(gated_relation_source)
-            pred_rel = pred_rel.sigmoid()
         # Connectivity
         pred_connectivity = self.connectivity_layer(gated_relation_source)
-        pred_connectivity = pred_connectivity.sigmoid()
 
         # from <Neural Motifs>
         if self.config.use_freq_bias and not self.config.hierarchical:
@@ -636,6 +628,10 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 pred_rel.device
             )
 
+        pred_connectivity = pred_connectivity.sigmoid()
+        if not self.config.hierarchical:
+            pred_rel = pred_rel.sigmoid()
+
         if not return_dict:
             if auxiliary_outputs is not None:
                 output = (logits, pred_boxes) + auxiliary_outputs + outputs
@@ -721,6 +717,60 @@ class SceneGraphGenerationLoss(nn.Module):
         self.focal_alpha = focal_alpha
         self.rel_sample_negatives_largest = rel_sample_negatives_largest
         self.rel_sample_nonmatching_largest = rel_sample_nonmatching_largest
+        self.super_relation_map = [
+            # 1-6: geometric
+            0,  # 1 above -> geometric
+            0,  # 2 accross -> geometric
+            0,  # 3 against -> geometric
+            0,  # 4 along -> geometric
+            0,  # 5 and -> geometric
+            0,  # 6 at -> geometric
+            2,  # 7 attached to -> semantic
+            0,  # 8 behind  -> geometric
+            1,  # 9: belonging to -> possessive
+            0,  # 10: between -> geometric
+            2,  # 11 carrying -> semantic
+            2,  # 12 covered in -> semantic
+            2,  # 13 covering -> semantic
+            2,  # 14 eating -> semantic
+            2,  # 15 flying in -> semantic
+            1,  # 16 for (misc) -> possessive (exclusion)
+            1,  # 17 from (misc) -> possessive (exclusion)
+            2,  # 18 growing on () -> semantic
+            2,  # 19 hanging from -> semantic
+            1,  # 20: has -> possessive
+            2,  # 21: holding -> semantic (light_semantic_posession treated as semantic)
+            0,  # 22 in -> geometric
+            0,  # 23 in front of -> geometric
+            2,  # 24 laying on -> semantic
+            2,  # 25 looking at -> semantic
+            2,  # 26 lying on -> semantic
+            1,  # 27 made of -> possessive
+            2,  # 28: mounted on -> semantic
+            0,  # 29: near -> geometric
+            1,  # 30: of -> possessive
+            0,  # 31 on -> geometric
+            0,  # 32 on back of -> geometric
+            0,  # 33 over -> geometric
+            # 34-35: semantic
+            2,  # 34 painted on -> semantic
+            2,  # 3 parked on -> semantic
+            1,  # 36: part of -> possessive
+            2,  # 37 playing -> semantic
+            2,  # 38 riding -> semantic
+            2,  # 39 says -> semantic
+            2,  # 40 sitting on -> semantic
+            2,  # 41 standing on -> semantic
+            1,  # 42: to -> possessive
+            0,  # 43: under -> geometric
+            2,  # 44: using -> semantic (light_semantic_posession treated as semantic)
+            2,  # 45 walking in -> semantic
+            2,  # 46 walking on -> semantic
+            2,  # 47 watching -> semantic
+            1,  # 48 wearing -> possessive
+            1,  # 49 wears -> possessive
+            1,  # 50: with -> possessive
+        ]
         self.nonmatching_cost = (
             -torch.log(torch.tensor(1e-8)) * matcher.class_cost
             + 4 * matcher.bbox_cost
@@ -729,10 +779,6 @@ class SceneGraphGenerationLoss(nn.Module):
         )  # set minimum bipartite matching costs for nonmatched object queries
 
         self.hierarchical = hierarchical
-        self.num_geometric = num_geometric
-        self.num_possessive = num_possessive
-        self.num_semantic = num_semantic
-        self.super_weight = super_weight
 
         if hierarchical:
             # Use NLLLoss for each relationship category
@@ -740,6 +786,29 @@ class SceneGraphGenerationLoss(nn.Module):
             self.poss_loss = nn.NLLLoss(reduction="none")
             self.sem_loss = nn.NLLLoss(reduction="none")
             self.super_loss = nn.NLLLoss(reduction="none")
+
+            fam_lists = {0: [], 1: [], 2: []}
+            for r, f in enumerate(self.super_relation_map):
+                fam_lists[f].append(r)
+
+            orig2famidx = torch.full(
+                (len(self.super_relation_map),), -1, dtype=torch.long
+            )
+            for f in (0, 1, 2):
+                for j, orig_id in enumerate(fam_lists[f]):
+                    orig2famidx[orig_id] = j
+
+            self.register_buffer(
+                "orig2fam",
+                torch.tensor(self.super_relation_map, dtype=torch.long),
+                persistent=True,
+            )
+            self.register_buffer("orig2famidx", orig2famidx, persistent=False)
+
+            self.num_geometric = len(fam_lists[0])
+            self.num_possessive = len(fam_lists[1])
+            self.num_semantic = len(fam_lists[2])
+            self.super_weight = super_weight
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -961,6 +1030,8 @@ class SceneGraphGenerationLoss(nn.Module):
                         pred_super,
                         target_rel,
                         full_matching_cost,
+                        self.rel_sample_negatives,
+                        self.rel_sample_nonmatching
                     )
                 )
                 loss = geo_loss + poss_loss + sem_loss + self.super_weight * super_loss
@@ -1037,6 +1108,7 @@ class SceneGraphGenerationLoss(nn.Module):
                 return idx[keep]
 
             # random
+            assert 0, "dont reach there yet"
             rand = torch.randperm(idx.shape[0], device=device)[:k]
             return idx[rand]
 
@@ -1051,107 +1123,11 @@ class SceneGraphGenerationLoss(nn.Module):
 
         return relation_idx, weights
 
-    def class_to_super(self, relation_tensor):
-        """
-        Maps relationship indices to super-relationship categories
-        (0: geometric, 1: possessive, 2: semantic)
-
-        Input: relation_tensor - tensor of relationship indices
-        Output: tensor of super-relationship indices (0, 1, or 2)
-        """
-        # Define the mapping from relationship to super-relationship
-        # Based on Visual Genome relationship hierarchy
-        super_relation_map = [
-            # 1-6: geometric
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            # 7: attached to -> semantic
-            2,
-            # 8: behind -> geometric
-            0,
-            # 9: belonging to -> possessive
-            1,
-            # 10: between -> geometric
-            0,
-            # 11-14: semantic
-            2,
-            2,
-            2,
-            2,
-            # 15: flying in -> semantic
-            2,
-            # 16-17: misc -> semantic
-            2,
-            2,
-            # 18-19: semantic
-            2,
-            2,
-            # 20: has -> possessive
-            1,
-            # 21: holding -> semantic (light_semantic_posession treated as semantic)
-            2,
-            # 22-23: geometric
-            0,
-            0,
-            # 24-27: semantic
-            2,
-            2,
-            2,
-            2,
-            # 28: mounted on -> semantic
-            2,
-            # 29: near -> geometric
-            0,
-            # 30: of -> possessive
-            1,
-            # 31-33: geometric
-            0,
-            0,
-            0,
-            # 34-35: semantic
-            2,
-            2,
-            # 36: part of -> possessive
-            1,
-            # 37-41: semantic
-            2,
-            2,
-            2,
-            2,
-            2,
-            # 42: to -> possessive
-            1,
-            # 43: under -> geometric
-            0,
-            # 44: using -> semantic (light_semantic_posession treated as semantic)
-            2,
-            # 45-47: semantic
-            2,
-            2,
-            2,
-            # 48-49: wearing -> semantic
-            2,
-            2,
-            # 50: with -> possessive
-            1,
-        ]
-
-        # Convert to tensor on the same device
-        super_map = torch.tensor(
-            super_relation_map, dtype=torch.long, device=relation_tensor.device
-        )
-        # Apply mapping
-        return super_map[relation_tensor]
-
     def _hierarchical_relation_loss(
         self,
         pred_geo,
         pred_poss,
-        pred_sem,  # (N,N,g) (N,N,p) (N,N,s) logits
+        pred_sem,  # (N,N,g) (N,N,p) (N,N,s) log-prob
         pred_super,  # (N,N,3)           logits
         target_rel,  # (N,N,R)           one-hot
         matching_cost,  # (N,)              Hungarian cost
@@ -1160,24 +1136,48 @@ class SceneGraphGenerationLoss(nn.Module):
     ):
         """
         Returns four scalars (geo, poss, sem, super) **per image**.
-        Sampling parameters default to `self.rel_sample_negatives` … if you
-        keep the call-site unchanged.
+        Sampling parameters default to `self.rel_sample_negatives`
         """
+        assert pred_geo.size(-1) == self.num_geometric
+        assert pred_poss.size(-1) == self.num_possessive
+        assert pred_sem.size(-1) == self.num_semantic
 
-        tgt_geo = target_rel[..., : self.num_geometric]
-        tgt_poss = target_rel[
-            ..., self.num_geometric : self.num_geometric + self.num_possessive
-        ]
-        tgt_sem = target_rel[..., self.num_geometric + self.num_possessive :]
+        # tgt_geo = target_rel[..., : self.num_geometric]
+        # tgt_poss = target_rel[
+        #    ..., self.num_geometric : self.num_geometric + self.num_possessive
+        # ]
+        # tgt_sem = target_rel[..., self.num_geometric + self.num_possessive :]
+        tgt_geo = target_rel.new_zeros(
+            (target_rel.size(0), target_rel.size(0), self.num_geometric)
+        )
+        tgt_poss = target_rel.new_zeros(
+            (target_rel.size(0), target_rel.size(0), self.num_possessive)
+        )
+        tgt_sem = target_rel.new_zeros(
+            (target_rel.size(0), target_rel.size(0), self.num_semantic)
+        )
+
+        idx = torch.nonzero(target_rel, as_tuple=False)
+        if idx.numel() > 0:
+            i, j, orig = idx[:, 0], idx[:, 1], idx[:, 2]
+            fam = self.orig2fam[orig]
+            fam_idx = self.orig2famidx[orig]
+
+            if (fam == 0).any():
+                tgt_geo[i[fam == 0], j[fam == 0], fam_idx[fam == 0]] = 1.0
+            if (fam == 1).any():
+                tgt_poss[i[fam == 1], j[fam == 1], fam_idx[fam == 1]] = 1.0
+            if (fam == 2).any():
+                tgt_sem[i[fam == 2], j[fam == 2], fam_idx[fam == 2]] = 1.0
 
         w_obj = 1.0 - matching_cost.sigmoid()
         w_pair = torch.outer(w_obj, w_obj)  # NxN
 
         # super-relation loss
-        mask_rel = target_rel.sum(-1) > 0
+        mask_rel = target_rel.sum(-1) > 0  # NxN
         if mask_rel.any():
             rel_idx = target_rel[mask_rel].argmax(-1)
-            super_tgt = self.class_to_super(rel_idx)  # 0/1/2
+            super_tgt = self.orig2fam[rel_idx]  # 0/1/2
 
             super_loss_vec = self.super_loss(pred_super[mask_rel], super_tgt)
             super_loss = (
@@ -1218,10 +1218,10 @@ class SceneGraphGenerationLoss(nn.Module):
             if idx.numel() == 0:
                 return (pred * 0).sum()  # keep 0 gradient without detaching
 
-            logits = pred[idx[:, 0], idx[:, 1]]  # (M, C_fam)
+            logp = pred[idx[:, 0], idx[:, 1]]  # (M, C_fam)
             c = tgt[idx[:, 0], idx[:, 1]].argmax(-1)  # (M,)
 
-            return (loss_fn(logits, c) * w).mean()
+            return (loss_fn(logp, c) * w).mean()
 
         geo_loss = _sampled_loss_family(pred_geo, tgt_geo, self.geo_loss)
         poss_loss = _sampled_loss_family(pred_poss, tgt_poss, self.poss_loss)
