@@ -1,6 +1,4 @@
-# Use CUDA *devel* so nvcc is available for extensions
-FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
-
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -23,7 +21,8 @@ ENV CONDA_ALWAYS_YES=true
 # Non-root (better file perms on mounted volumes)
 ARG USERNAME=appuser
 ARG USERID=1000
-RUN useradd -m -s /bin/bash -u ${USERID} ${USERNAME}
+
+RUN useradd -m -s /bin/bash -u ${USERID} -g 1000 -o ${USERNAME}
 
 WORKDIR /workspace
 
@@ -45,16 +44,18 @@ RUN if [ -f "environment.yml" ]; then \
 
 # --- CUDA / Torch config for builds and runtime ---
 ENV CUDA_HOME=/usr/local/cuda \
-    TORCH_CUDA_ARCH_LIST=8.6 \
+    TORCH_CUDA_ARCH_LIST="9.0+PTX;8.9;8.6" \
     TORCH_EXTENSIONS_DIR=/workspace/.cache/torch_extensions \
     MAX_JOBS=8
 
 # 2) Install PyTorch (CUDA 12.4 wheels)  ← cu124 wheels work with host driver 12.8
-ARG TORCH_VER=2.4.1
-ARG TVISION_VER=0.19.1
+ARG TORCH_VER=2.7.0
+ARG TVISION_VER=0.22.0
 RUN pip install --no-cache-dir \
-    torch==${TORCH_VER} torchvision==${TVISION_VER} \
-    --index-url https://download.pytorch.org/whl/cu124
+    torch==${TORCH_VER} torchvision==${TVISION_VER} torchaudio==${TORCH_VER} \
+    --index-url https://download.pytorch.org/whl/cu128
+
+
 
 # 3) Install pip packages (from requirements.txt) — no torch/torchvision here
 ENV PIP_NO_CACHE_DIR=1
@@ -66,10 +67,6 @@ RUN if [ -f "requirements.txt" ]; then \
 RUN pip install --no-cache-dir \
     cython==3.0.10 numpy==1.24.4 packaging==23.2 ninja
 
-# 🔒 Belt & suspenders: ensure cu124 torch wasn't overwritten by requirements.txt
-RUN pip install --no-cache-dir --upgrade --force-reinstall \
-    torch==${TORCH_VER} torchvision==${TVISION_VER} \
-    --index-url https://download.pytorch.org/whl/cu124
 
 # Create torch extensions cache dir (writable)
 RUN mkdir -p "$TORCH_EXTENSIONS_DIR"
@@ -85,21 +82,11 @@ RUN set -e; \
       cd lib/fpn && bash make.sh && cd -; \
     fi
 
-# Deformable attention (optional paths — add/adjust as needed)
-# Example: if your repo has lib/deform_attn/make.sh
-RUN set -e; \
-    if [ -f "lib/deform_attn/make.sh" ]; then \
-      echo "Building deformable attention ops ..."; \
-      cd lib/deform_attn && bash make.sh && cd -; \
-    elif [ -f "models/ops/setup.py" ]; then \
-      echo "Building ops via setup.py ..."; \
-      cd models/ops && python setup.py build_ext --inplace && cd -; \
-    fi
-
 # Caches (optional but helpful)
 ENV HF_HOME=/workspace/.cache/huggingface \
     WANDB_DIR=/workspace/.cache/wandb
-RUN mkdir -p $HF_HOME $WANDB_DIR && chown -R ${USERNAME}:${USERNAME} /workspace
+ARG GROUPID=${USERID}
+RUN mkdir -p $HF_HOME $WANDB_DIR && chown -R ${USERID}:${GROUPID} /workspace
 
 USER ${USERNAME}
 
