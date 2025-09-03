@@ -264,6 +264,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         if kwargs.get("fg_matrix", None) is not None:  # when training
             eps = config.freq_bias_eps
             fg_matrix = kwargs.get("fg_matrix", None)
+            self.fg_matrix = fg_matrix
             rel_dist = torch.FloatTensor(
                 (fg_matrix.sum(axis=(0, 1))) / (fg_matrix.sum() + eps)
             )
@@ -555,10 +556,8 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 rel_sample_negatives_largest=self.config.rel_sample_negatives_largest,
                 rel_sample_nonmatching_largest=self.config.rel_sample_nonmatching_largest,
                 hierarchical=self.config.hierarchical,
-                num_geometric=self.config.num_geometric,
-                num_possessive=self.config.num_possessive,
-                num_semantic=self.config.num_semantic,
                 super_weight=self.config.super_weight,
+                fg_matrix=self.fg_matrix
             )
 
             criterion.to(self.device)
@@ -681,10 +680,8 @@ class SceneGraphGenerationLoss(nn.Module):
         rel_sample_negatives_largest,
         rel_sample_nonmatching_largest,
         # Add hierarchical parameters
+        fg_matrix,
         hierarchical=False,
-        num_geometric=15,
-        num_possessive=11,
-        num_semantic=24,
         super_weight=1.0,  # weight of super relation at general rel loss sum
     ):
         """
@@ -809,6 +806,39 @@ class SceneGraphGenerationLoss(nn.Module):
             self.num_possessive = len(fam_lists[1])
             self.num_semantic = len(fam_lists[2])
             self.super_weight = super_weight
+
+            def class_balanced_weights(counts: torch.Tensor, beta: float = 0.9999, eps: float = 1e-12):
+                # counts: [K] (can be zero)
+                eff_num = 1.0 - torch.pow(beta, counts.clamp(min=0))
+                w = (1.0 - beta) / (eff_num + eps)     # larger for rarer classes
+                w = w / w.mean()                       # normalize to mean=1 to keep loss scale stable
+                return w 
+
+            if fg_matrix is not None:
+                rel_counts = torch.from_numpy(fg_matrix.sum(axis=(0, 1))).float()  # [R]
+
+                fam_map = torch.tensor(self.super_relation_map, dtype=torch.long)
+                mask_geo  = fam_map == 0
+                mask_poss = fam_map == 1
+                mask_sem  = fam_map == 2
+
+                w_geo  = class_balanced_weights(rel_counts[mask_geo],  beta=0.9999)
+                w_poss = class_balanced_weights(rel_counts[mask_poss], beta=0.9999)
+                w_sem  = class_balanced_weights(rel_counts[mask_sem],  beta=0.9999)
+
+                # Register as buffers so they move with .to(device) and save in checkpoints
+                self.register_buffer("w_geo",  w_geo,  persistent=True)
+                self.register_buffer("w_poss", w_poss, persistent=True)
+                self.register_buffer("w_sem",  w_sem,  persistent=True)
+            else:
+                self.register_buffer("w_geo",  torch.ones(self.num_geometric),  persistent=True)
+                self.register_buffer("w_poss", torch.ones(self.num_possessive), persistent=True)
+                self.register_buffer("w_sem",  torch.ones(self.num_semantic),   persistent=True)
+
+            self.geo_loss  = nn.NLLLoss(weight=self.w_geo,  reduction="none")
+            self.poss_loss = nn.NLLLoss(weight=self.w_poss, reduction="none")
+            self.sem_loss  = nn.NLLLoss(weight=self.w_sem,  reduction="none")
+            self.super_loss = nn.NLLLoss(reduction="none")
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -1142,11 +1172,6 @@ class SceneGraphGenerationLoss(nn.Module):
         assert pred_poss.size(-1) == self.num_possessive
         assert pred_sem.size(-1) == self.num_semantic
 
-        # tgt_geo = target_rel[..., : self.num_geometric]
-        # tgt_poss = target_rel[
-        #    ..., self.num_geometric : self.num_geometric + self.num_possessive
-        # ]
-        # tgt_sem = target_rel[..., self.num_geometric + self.num_possessive :]
         tgt_geo = target_rel.new_zeros(
             (target_rel.size(0), target_rel.size(0), self.num_geometric)
         )
@@ -1170,11 +1195,15 @@ class SceneGraphGenerationLoss(nn.Module):
             if (fam == 2).any():
                 tgt_sem[i[fam == 2], j[fam == 2], fam_idx[fam == 2]] = 1.0
 
-        w_obj = 1.0 - matching_cost.sigmoid()
+        w_obj = 1.0 - matching_cost.sigmoid().detach()
         w_pair = torch.outer(w_obj, w_obj)  # NxN
 
         # super-relation loss
         mask_rel = target_rel.sum(-1) > 0  # NxN
+        ij = mask_rel.nonzero(as_tuple=False)
+        assert torch.equal(pred_super[mask_rel], pred_super[ij[:,0], ij[:,1]])
+        assert torch.equal(target_rel[mask_rel], target_rel[ij[:,0], ij[:,1]])
+
         if mask_rel.any():
             rel_idx = target_rel[mask_rel].argmax(-1)
             super_tgt = self.orig2fam[rel_idx]  # 0/1/2

@@ -36,6 +36,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import ipdb
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -398,6 +399,7 @@ if is_torch_cuda_available() and is_ninja_available():
         )
         MultiScaleDeformableAttention = None
 else:
+    ipdb.set_trace()
     print("Torch cuda or ninja not available")
     MultiScaleDeformableAttention = None
 

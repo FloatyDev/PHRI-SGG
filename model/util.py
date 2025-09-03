@@ -2,6 +2,15 @@
 
 from typing import List, Optional
 
+import matplotlib as plt
+import ipdb
+from PIL import Image
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from util.box_ops import rescale_bboxes
+import pytorch_lightning as pl
+import os
+import wandb
 import torch
 from torch import Tensor, nn
 
@@ -187,3 +196,170 @@ def count_trainable(model, debugging=False):
         print(f"trainable params: {total:,}  ({total/1e6:.2f} M)")
 
     return total
+
+
+class GTTripletVis(pl.Callback):
+    """
+    Plot GT triplets straight from the batch that flows through training.
+
+    Parameters
+    ----------
+    dataset          : VGDataset      (training split) – to resolve img paths
+    id2label         : dict[int,str]  – object id ➜ name
+    rel_categories   : list[str]      – predicates
+    freq             : int            – visualise every `freq` steps
+    max_triplets     : int | None     – truncate long lists for readability
+    dpi              : int            – Matplotlib DPI of the figure
+    """
+
+    def __init__(
+        self,
+        dataset,
+        id2label,
+        rel_categories,
+        max_triplets=None,
+        freq: int = 500,
+        dpi: int = 120,
+    ):
+        super().__init__()
+        self.dataset = dataset
+        self.id2label = id2label
+        self.rel_categories = rel_categories
+        self.freq = freq
+        self.max_triplets = max_triplets
+        self.dpi = dpi
+
+    # --------------------------------------------------------------------- #
+    #                   Lightning hook: called every batch                  #
+    # --------------------------------------------------------------------- #
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx: int):
+        global_step = trainer.global_step
+        if global_step % self.freq != 0:  # skip most batches
+            return
+
+        if isinstance(batch, dict):  # batch_size == 1 case
+            targets = batch["labels"]  # List[dict] len==1
+        else:  # normal tuple from collate
+            _, targets = batch  # targets already a list
+
+        tgt = targets[0]
+        image_id = int(tgt["image_id"].item())
+
+        # ------------------------------------------------------------------ #
+        meta = self.dataset.coco.imgs[image_id]
+        img_file = meta["file_name"]
+        if not os.path.isabs(img_file):
+            img_file = os.path.join(self.dataset.root, img_file)
+
+        import PIL.Image as Image
+
+        image = Image.open(img_file).convert("RGB")
+        W, H = image.size
+
+        # ------------------------------------------------------------------ #
+        # 2. Convert GT tensors ➜ numpy
+        boxes_xyxy = rescale_bboxes(tgt["boxes"].cpu(), (W, H)).numpy()
+        obj_cls = tgt["class_labels"].cpu().numpy()  # (N,)
+        rel = tgt["rel"].cpu()  # (N,N,R)
+        trip_idx = torch.nonzero(rel, as_tuple=False).cpu().numpy()
+
+        if self.max_triplets is not None:
+            trip_idx = trip_idx[: self.max_triplets]
+
+        # ------------------------------------------------------------------ #
+        # 3. Draw
+        fig, ax = plt.subplots(figsize=(W / self.dpi, H / self.dpi), dpi=self.dpi)
+        ax.imshow(image)
+        cmap = plt.cm.get_cmap("hsv", len(trip_idx) + 1)
+
+        for t, (sub_i, obj_i, rel_id) in enumerate(trip_idx, start=1):
+            colour = cmap(t)
+
+            # subject
+            x1, y1, x2, y2 = boxes_xyxy[sub_i]
+            ax.add_patch(
+                patches.Rectangle(
+                    (x1, y1),
+                    x2 - x1,
+                    y2 - y1,
+                    linewidth=2,
+                    edgecolor=colour,
+                    facecolor="none",
+                )
+            )
+            ax.text(
+                x1,
+                y1 - 4,
+                self.id2label[int(obj_cls[sub_i])],
+                fontsize=8,
+                color=colour,
+                weight="bold",
+            )
+
+            # object
+            xo1, yo1, xo2, yo2 = boxes_xyxy[obj_i]
+            ax.add_patch(
+                patches.Rectangle(
+                    (xo1, yo1),
+                    xo2 - xo1,
+                    yo2 - yo1,
+                    linewidth=2,
+                    edgecolor=colour,
+                    facecolor="none",
+                )
+            )
+            ax.text(
+                xo1,
+                yo1 - 4,
+                self.id2label[int(obj_cls[obj_i])],
+                fontsize=8,
+                color=colour,
+                weight="bold",
+            )
+
+            # predicate label at mid-point
+            xm, ym = (x1 + x2 + xo1 + xo2) / 4, (y1 + y2 + yo1 + yo2) / 4
+            ax.text(
+                xm,
+                ym,
+                self.rel_categories[int(rel_id)],
+                fontsize=8,
+                color=colour,
+                bbox=dict(facecolor="white", alpha=0.6, edgecolor="none"),
+            )
+
+        ax.axis("off")
+        fig.tight_layout()
+        plt.draw()
+
+        # ------------------------------------------------------------------ #
+        # 4. Log the figure
+        def _log_figure(fig, tag: str, step: int, trainer):
+            """
+            Send `fig` to every logger registered in the current Trainer.
+            Works with Lightning >=1.6 where `trainer.logger` may be
+            a LoggerCollection.
+            """
+            loggers = (
+                trainer.loggers
+                if hasattr(trainer, "loggers")  # pl>=2.0
+                else (
+                    trainer.logger
+                    if isinstance(trainer.logger, (list, tuple))
+                    else [trainer.logger]
+                )
+            )
+
+            for lg in loggers:
+                # --- TensorBoard ---------------------------------------------------
+                if hasattr(lg, "experiment") and hasattr(lg.experiment, "add_figure"):
+                    lg.experiment.add_figure(tag, fig, global_step=step)
+
+                # --- WandB ---------------------------------------------------------
+                if isinstance(lg, pl.loggers.WandbLogger):
+                    lg.experiment.log({tag: wandb.Image(fig)}, step=step)
+
+        # ------------------------------------------------------------------ #
+        # … inside on_train_batch_end after creating `fig`
+        _log_figure(fig, tag="GT_triplets/train", step=global_step, trainer=trainer)
+        plt.close(fig)

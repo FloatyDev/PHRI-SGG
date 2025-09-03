@@ -9,6 +9,7 @@ import os
 from glob import glob
 from pathlib import Path
 
+import ipdb
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -37,7 +38,7 @@ from model.deformable_detr import (
 from model.egtr import DetrForSceneGraphGeneration
 from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
-from model.util import count_trainable
+from model.util import GTTripletVis, count_trainable
 
 seed_everything(42, workers=True)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -309,7 +310,9 @@ class SGG(pl.LightningModule):
                 else:
                     state_dict[k[6:]] = state_dict.pop(k)  # "model."
 
-            self.model.load_state_dict(state_dict, strict=False)
+            missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+            print("[sgg] missing keys:", missing)
+            print("[sgg] unexpected keys:", unexpected)
 
             # disable all parameters and enable training only the relation head
             for p in self.model.parameters():
@@ -393,9 +396,9 @@ class SGG(pl.LightningModule):
         # logs metrics for each training_step,
         # and the average across the epoch
         # Log metrics directly with epoch aggregation
-        self.log("training_loss", loss, on_step=True, on_epoch=True)
+        self.log("training_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
         for k, v in loss_dict.items():
-            self.log(f"training_{k}", v, on_step=True, on_epoch=True)
+            self.log(f"training_{k}", v, on_step=True, on_epoch=True, sync_dist=True)
 
         return loss
 
@@ -612,7 +615,7 @@ if __name__ == "__main__":
 
     # Training
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--accumulate", type=int, default=2)
+    parser.add_argument("--accumulate", type=int, default=8)
     parser.add_argument("--gpus", type=int, default=1)  # change to 1
     parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--max_epochs_finetune", type=int, default=25)
@@ -806,12 +809,13 @@ if __name__ == "__main__":
             )[-1]
     else:
         ckpt_path = None
+    print(f"ckpt_path: {ckpt_path}")
     # Module
     module = SGG(
         architecture=args.architecture,
         backbone_dirpath=args.backbone_dirpath,
         auxiliary_loss=args.auxiliary_loss,
-        lr=args.lr,
+        lr=1e-3,
         lr_backbone=args.lr_backbone,
         lr_initialized=args.lr_initialized,
         weight_decay=args.weight_decay,
@@ -861,7 +865,14 @@ if __name__ == "__main__":
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"
     )
-    lr_monitor_callback = LearningRateMonitor(logging_interval="step")
+    lr_monitor_callback = LearningRateMonitor(logging_interval="epoch")
+
+    visualize_imgs = GTTripletVis(
+        dataset=train_dataset,
+        id2label=id2label,
+        rel_categories=rel_categories,
+        freq=1,
+    )
 
     # Train
     trainer = None
@@ -873,27 +884,40 @@ if __name__ == "__main__":
             ).log_dir
         ).exists():
             # Training
+            K = 400  # 200–500 images
             trainer = Trainer(
-                precision=args.precision,
-                logger=logger_list,
-                devices=args.gpus,
                 accelerator="gpu",
-                max_epochs=args.max_epochs,
-                gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=False),
-                callbacks=[
-                    checkpoint_callback,
-                    early_stop_callback,
-                    lr_monitor_callback,
-                ],
-                accumulate_grad_batches=args.accumulate,
+                devices=1,  # single GPU for simplicity
+                precision="32-true",
+                max_epochs=200,  # plenty of epochs to overfit
+                overfit_batches=K,  # <— trains on first K batches and also validates on them
+                num_sanity_val_steps=0,
+                enable_checkpointing=False,
+                logger=True,
+                gradient_clip_val=0.0,
+                strategy="auto",  # avoid DDP; keep it simple
             )
+            # trainer = Trainer(
+            #    precision=args.precision,
+            #    logger=logger_list,
+            #    devices=args.gpus,
+            #    accelerator="gpu",
+            #    max_epochs=args.max_epochs,
+            #    gradient_clip_val=args.gradient_clip_val,
+            #    strategy=DDPStrategy(find_unused_parameters=False),
+            #    callbacks=[
+            #        checkpoint_callback,
+            #        early_stop_callback,
+            #        lr_monitor_callback,
+            #    ],
+            #    accumulate_grad_batches=args.accumulate,
+            # )
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Main training")
             if ckpt_path is not None:
                 print(f"### Resume training from {ckpt_path}")
-            trainer.fit(module, ckpt_path=ckpt_path) # no resume
+            trainer.fit(module, ckpt_path=ckpt_path)  # no resume
 
             try:
                 os.chmod(tensorboard_logger.log_dir, 0o0777)
@@ -920,7 +944,7 @@ if __name__ == "__main__":
                 architecture=args.architecture,
                 backbone_dirpath=args.backbone_dirpath,
                 auxiliary_loss=args.auxiliary_loss,
-                lr=args.lr * 0.1,  # change lr
+                lr=1e-3,  # change lr
                 lr_backbone=args.lr_backbone * 0.1,
                 lr_initialized=args.lr_initialized * 0.1,
                 weight_decay=args.weight_decay,
