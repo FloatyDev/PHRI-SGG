@@ -885,35 +885,21 @@ if __name__ == "__main__":
                 save_dir, name=f"{name}__finetune", version=version
             ).log_dir
         ).exists():
-            # Training
-            K = 200  # 200–500 images
             trainer = Trainer(
-                accelerator="gpu",
-                devices=1,  # single GPU for simplicity
-                precision="32-true",
+                precision=args.precision,
                 logger=logger_list,
-                max_epochs=200,  # plenty of epochs to overfit
-                overfit_batches=K,
-                num_sanity_val_steps=0,
-                enable_checkpointing=False,
-                gradient_clip_val=0.0,
-                strategy="auto",  # avoid DDP; keep it simple
+                devices=args.gpus,
+                accelerator="gpu",
+                max_epochs=args.max_epochs,
+                gradient_clip_val=args.gradient_clip_val,
+                strategy=DDPStrategy(find_unused_parameters=False),
+                callbacks=[
+                    checkpoint_callback,
+                    early_stop_callback,
+                    lr_monitor_callback,
+                ],
+                accumulate_grad_batches=args.accumulate,
             )
-            # trainer = Trainer(
-            #    precision=args.precision,
-            #    logger=logger_list,
-            #    devices=args.gpus,
-            #    accelerator="gpu",
-            #    max_epochs=args.max_epochs,
-            #    gradient_clip_val=args.gradient_clip_val,
-            #    strategy=DDPStrategy(find_unused_parameters=False),
-            #    callbacks=[
-            #        checkpoint_callback,
-            #        early_stop_callback,
-            #        lr_monitor_callback,
-            #    ],
-            #    accumulate_grad_batches=args.accumulate,
-            # )
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Main training")
