@@ -56,6 +56,7 @@ def evaluate_batch(
     oi_evaluator,
     num_labels,
     max_topk=100,
+    hierarchical=False,
 ):
     for j, target in enumerate(targets):
         # Pred
@@ -396,9 +397,9 @@ class SGG(pl.LightningModule):
         # logs metrics for each training_step,
         # and the average across the epoch
         # Log metrics directly with epoch aggregation
-        self.log("training_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
+        self.log("training_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         for k, v in loss_dict.items():
-            self.log(f"training_{k}", v, on_step=True, on_epoch=True, sync_dist=True)
+            self.log(f"training_{k}", v, on_step=False, on_epoch=True, sync_dist=True)
 
         return loss
 
@@ -458,6 +459,7 @@ class SGG(pl.LightningModule):
                 self.single_sgg_evaluator_list,
                 self.oi_evaluator,
                 self.config.num_labels,
+                hierarchical=True,
             )
             # eval OD
             if self.coco_evaluator is not None:
@@ -654,13 +656,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--precision", type=int, default=32, choices=[16, 32])
 
-    parser.add_argument("--hierarchical", type=bool, default=False)
+    parser.add_argument("--hierarchical", type=str2bool, default=False)
     parser.add_argument("--num_geometric", type=int, default=15)
     parser.add_argument("--num_possessive", type=int, default=11)
     parser.add_argument("--num_semantic", type=int, default=24)
     parser.add_argument("--num_negatives", type=int, default=49)
     parser.add_argument("--super_weight", type=int, default=1)
-    parser.add_argument("--train_head", type=bool, default=False)
+    parser.add_argument("--train_head", type=str2bool, default=False)
     parser.add_argument("--artifact_path", type=str, default="")
 
     args = parser.parse_args()
@@ -809,13 +811,13 @@ if __name__ == "__main__":
             )[-1]
     else:
         ckpt_path = None
-    print(f"ckpt_path: {ckpt_path}")
+    print(f"ckpt_path for resume: {ckpt_path}")
     # Module
     module = SGG(
         architecture=args.architecture,
         backbone_dirpath=args.backbone_dirpath,
         auxiliary_loss=args.auxiliary_loss,
-        lr=1e-3,
+        lr=1e-5,
         lr_backbone=args.lr_backbone,
         lr_initialized=args.lr_initialized,
         weight_decay=args.weight_decay,
@@ -884,16 +886,16 @@ if __name__ == "__main__":
             ).log_dir
         ).exists():
             # Training
-            K = 400  # 200–500 images
+            K = 200  # 200–500 images
             trainer = Trainer(
                 accelerator="gpu",
                 devices=1,  # single GPU for simplicity
                 precision="32-true",
+                logger=logger_list,
                 max_epochs=200,  # plenty of epochs to overfit
-                overfit_batches=K,  # <— trains on first K batches and also validates on them
+                overfit_batches=K,
                 num_sanity_val_steps=0,
                 enable_checkpointing=False,
-                logger=True,
                 gradient_clip_val=0.0,
                 strategy="auto",  # avoid DDP; keep it simple
             )
@@ -944,7 +946,7 @@ if __name__ == "__main__":
                 architecture=args.architecture,
                 backbone_dirpath=args.backbone_dirpath,
                 auxiliary_loss=args.auxiliary_loss,
-                lr=1e-3,  # change lr
+                lr=1e-5 * 0.1,  # change lr
                 lr_backbone=args.lr_backbone * 0.1,
                 lr_initialized=args.lr_initialized * 0.1,
                 weight_decay=args.weight_decay,
