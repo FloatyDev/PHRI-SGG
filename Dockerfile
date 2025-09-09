@@ -24,7 +24,7 @@ ARG USERID=1000
 
 RUN useradd -m -s /bin/bash -u ${USERID} -g 1000 -o ${USERNAME}
 
-WORKDIR /workspace
+WORKDIR /localpc
 
 # - environment.yml: CONDA-ONLY (no pip block)
 # - requirements.txt: PIP packages (EXCEPT torch/torchvision)
@@ -72,7 +72,7 @@ RUN pip install --no-cache-dir \
 RUN mkdir -p "$TORCH_EXTENSIONS_DIR"
 
 # Copy the rest of your project into the image
-COPY . .
+COPY ./lib .
 
 # Build your project’s native/CUDA extensions
 # FPN
