@@ -399,9 +399,9 @@ class SGG(pl.LightningModule):
         # logs metrics for each training_step,
         # and the average across the epoch
         # Log metrics directly with epoch aggregation
-        self.log("training_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        self.log("training_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
         for k, v in loss_dict.items():
-            self.log(f"training_{k}", v, on_step=False, on_epoch=True, sync_dist=True)
+            self.log(f"training_{k}", v, on_step=True, on_epoch=True, sync_dist=True)
 
         return loss
 
@@ -795,6 +795,10 @@ if __name__ == "__main__":
         name += f"__{args.memo}"
     if args.debug:
         name += "__debug"
+    if args.hierarchical:
+        name += "__hier"
+    if args.train_head:
+        name += "train_rel_head"
     if args.resume:
         version = args.version  # for resuming
     else:
@@ -804,7 +808,7 @@ if __name__ == "__main__":
     tensorboard_logger = TensorBoardLogger(save_dir, name=name, version=version)
 
     # initialize wandblogger
-    wandb_logger = WandbLogger(project="hier-egtr", log_model="all", save_dir="./logs")
+    wandb_logger = WandbLogger(project="hier-egtr", log_model="all", save_dir="./logs",name=name)
 
     logger_list = [tensorboard_logger, wandb_logger]
     if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints"):
