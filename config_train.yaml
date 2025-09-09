@@ -1,0 +1,65 @@
+# Data path
+data_path: "dataset/visual_genome"
+output_path: "results/"  # Required - change this to your desired output path
+backbone_dirpath: ""
+
+# Architecture
+architecture: "SenseTime/deformable-detr"
+auxiliary_loss: false
+from_scratch: false
+pretrained: "pretrained_detr_vg/pretrained_detr__SenseTime__deformable-detr/batch__32__epochs__150_50__lr__1e-05_0.0001__visual_genome__finetune/version_0"  # Required - change this to your desired pretrained model
+
+# Hyperparameters
+num_queries: 200
+ce_loss_coefficient: 2.0
+rel_loss_coefficient: 15.0
+connectivity_loss_coefficient: 30.0
+smoothing: 1.0e-14
+rel_sample_negatives: 80
+rel_sample_nonmatching: 80
+rel_sample_negatives_largest: true
+rel_sample_nonmatching_largest: true
+
+# Training
+batch_size: 1
+accumulate: 8
+gpus: 1
+max_epochs: 50
+max_epochs_finetune: 25
+lr_backbone: 2.0e-7
+lr: 2.0e-6
+lr_initialized: 2.0e-4
+weight_decay: 1.0e-4
+gradient_clip_val: 0.1
+debug: false
+resume: true
+memo: ""
+version: 1
+patience: 15
+finetune: true
+filter_duplicate_rels: true
+filter_multiple_rels: true
+use_freq_bias: true
+use_log_softmax: false
+
+# Evaluation
+skip_train: false
+split: "val"  # choices: val, test
+eval_batch_size: 1
+eval_when_train_end: true
+eval_single_preds: true
+eval_multiple_preds: false
+logit_adjustment: false
+logit_adj_tau: 0.3
+
+# Speed up
+num_workers: 4
+precision: 32  # choices: 16, 32
+hierarchical: false
+num_geometric: 15
+num_possessive: 11
+num_semantic: 24
+num_negatives: 49
+super_weight: 1
+train_head: false
+artifact_path: ""
