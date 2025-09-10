@@ -21,8 +21,8 @@ rel_sample_negatives_largest: true
 rel_sample_nonmatching_largest: true
 
 # Training
-batch_size: 1
-accumulate: 8
+batch_size: 4
+accumulate: 1
 gpus: 1
 max_epochs: 50
 max_epochs_finetune: 25
@@ -43,7 +43,7 @@ use_freq_bias: true
 use_log_softmax: false
 
 # Evaluation
-skip_train: false
+skip_train: true
 split: "val"  # choices: val, test
 eval_batch_size: 1
 eval_when_train_end: true
