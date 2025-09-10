@@ -808,7 +808,9 @@ if __name__ == "__main__":
     tensorboard_logger = TensorBoardLogger(save_dir, name=name, version=version)
 
     # initialize wandblogger
-    wandb_logger = WandbLogger(project="hier-egtr", log_model="all", save_dir="./logs",name=name)
+    wandb_logger = WandbLogger(
+        project="hier-egtr", log_model="all", save_dir="./logs", name=name
+    )
 
     logger_list = [tensorboard_logger, wandb_logger]
     if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints"):
@@ -827,7 +829,7 @@ if __name__ == "__main__":
         architecture=args.architecture,
         backbone_dirpath=args.backbone_dirpath,
         auxiliary_loss=args.auxiliary_loss,
-        lr=args.lr * 0.1,
+        lr=args.lr,
         lr_backbone=args.lr_backbone,
         lr_initialized=args.lr_initialized,
         weight_decay=args.weight_decay,
@@ -915,7 +917,7 @@ if __name__ == "__main__":
                 print("### Main training")
             if ckpt_path is not None:
                 print(f"### Resume training from {ckpt_path}")
-            trainer.fit(module, ckpt_path=ckpt_path)  # no resume
+            trainer.fit(module, ckpt_path=ckpt_path)
 
             try:
                 os.chmod(tensorboard_logger.log_dir, 0o0777)
@@ -942,7 +944,7 @@ if __name__ == "__main__":
                 architecture=args.architecture,
                 backbone_dirpath=args.backbone_dirpath,
                 auxiliary_loss=args.auxiliary_loss,
-                lr=args.lr * 0.01,  # change lr
+                lr=args.lr * 0.1,
                 lr_backbone=args.lr_backbone,
                 lr_initialized=args.lr_initialized,
                 weight_decay=args.weight_decay,
