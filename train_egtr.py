@@ -7,9 +7,11 @@ import json
 import yaml
 import os
 import sys
+import shutil
 
 from glob import glob
 from pathlib import Path
+from pytorch_lightning.callbacks import Callback
 
 import ipdb
 import numpy as np
@@ -811,7 +813,7 @@ if __name__ == "__main__":
     wandb_logger = WandbLogger(
         project="hier-egtr", log_model="all", save_dir="./logs", name=name
     )
-
+    ipdb.set_trace()
     logger_list = [tensorboard_logger, wandb_logger]
     if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints"):
         if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints/last.ckpt"):
@@ -887,7 +889,21 @@ if __name__ == "__main__":
         rel_categories=rel_categories,
         freq=1,
     )
-
+    class SaveConfigCallback(Callback):
+        def __init__(self, config_path, log_dir):
+            self.config_path = config_path
+            self.log_dir = log_dir
+            
+        def on_train_start(self, trainer, pl_module):
+            # Only save on rank 0 to avoid race conditions in DDP
+            if trainer.global_rank == 0:
+                config_dest = Path(self.log_dir) / "config_train.yaml"
+                shutil.copy2(self.config_path, config_dest)
+                print(f"Saved config to: {config_dest}")
+    config_callback = SaveConfigCallback(
+        config_path="./config_train.yaml",  # Update with your config path
+        log_dir=tensorboard_logger.log_dir
+    )
     # Train
     trainer = None
     if not args.skip_train:
@@ -909,6 +925,7 @@ if __name__ == "__main__":
                     checkpoint_callback,
                     early_stop_callback,
                     lr_monitor_callback,
+                    config_callback
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
