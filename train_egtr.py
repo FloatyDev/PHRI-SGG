@@ -4,11 +4,14 @@
 
 import argparse
 import json
+import yaml
 import os
+import sys
 
 from glob import glob
 from pathlib import Path
 
+import ipdb
 import numpy as np
 import pytorch_lightning as pl
 import torch
@@ -37,7 +40,7 @@ from model.deformable_detr import (
 from model.egtr import DetrForSceneGraphGeneration
 from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
-from model.util import count_trainable
+from model.util import GTTripletVis, count_trainable
 
 seed_everything(42, workers=True)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -55,6 +58,7 @@ def evaluate_batch(
     oi_evaluator,
     num_labels,
     max_topk=100,
+    hierarchical=False,
 ):
     for j, target in enumerate(targets):
         # Pred
@@ -309,7 +313,9 @@ class SGG(pl.LightningModule):
                 else:
                     state_dict[k[6:]] = state_dict.pop(k)  # "model."
 
-            self.model.load_state_dict(state_dict, strict=False)
+            missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+            print("[sgg] missing keys:", missing)
+            print("[sgg] unexpected keys:", unexpected)
 
             # disable all parameters and enable training only the relation head
             for p in self.model.parameters():
@@ -393,9 +399,9 @@ class SGG(pl.LightningModule):
         # logs metrics for each training_step,
         # and the average across the epoch
         # Log metrics directly with epoch aggregation
-        self.log("training_loss", loss, on_step=True, on_epoch=True)
+        self.log("training_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
         for k, v in loss_dict.items():
-            self.log(f"training_{k}", v, on_step=True, on_epoch=True)
+            self.log(f"training_{k}", v, on_step=True, on_epoch=True, sync_dist=True)
 
         return loss
 
@@ -455,6 +461,7 @@ class SGG(pl.LightningModule):
                 self.single_sgg_evaluator_list,
                 self.oi_evaluator,
                 self.config.num_labels,
+                hierarchical=True,
             )
             # eval OD
             if self.coco_evaluator is not None:
@@ -557,82 +564,57 @@ class SGG(pl.LightningModule):
         return val_dataloader
 
 
-if __name__ == "__main__":
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    elif v.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    else:
+        raise argparse.ArgumentTypeError("Boolean value expected.")
 
-    def str2bool(v):
-        if isinstance(v, bool):
-            return v
-        if v.lower() in ("yes", "true", "t", "y", "1"):
-            return True
-        elif v.lower() in ("no", "false", "f", "n", "0"):
-            return False
-        else:
-            raise argparse.ArgumentTypeError("Boolean value expected.")
 
-    parser = argparse.ArgumentParser()
-    # Path
+def build_parser(parser):
+    # Your existing args
     parser.add_argument("--data_path", type=str, default="dataset/visual_genome")
-    parser.add_argument(
-        "--output_path",
-        type=str,
-        required=True,
-    )
-    parser.add_argument(
-        "--backbone_dirpath", type=str, default=""
-    )  # required when from_scratch is True
-
-    # Architecture
+    parser.add_argument("--output_path", type=str, required=False)
+    parser.add_argument("--backbone_dirpath", type=str, default="")
     parser.add_argument("--architecture", type=str, default="SenseTime/deformable-detr")
     parser.add_argument("--auxiliary_loss", type=str2bool, default=False)
-    parser.add_argument(
-        "--from_scratch", type=str2bool, default=False
-    )  # whether to train without pretrained detr
-    parser.add_argument(
-        "--pretrained",
-        type=str,
-        required=True,
-    )  # set to "architecture" when from_scratch is True
+    parser.add_argument("--from_scratch", type=str2bool, default=False)
+    parser.add_argument("--pretrained", type=str, required=False)
 
     # Hyperparameters
     parser.add_argument("--num_queries", type=int, default=200)
     parser.add_argument("--ce_loss_coefficient", type=float, default=2.0)
     parser.add_argument("--rel_loss_coefficient", type=float, default=15.0)
-    parser.add_argument(
-        "--connectivity_loss_coefficient", type=float, default=30.0
-    )  # OI: 90
+    parser.add_argument("--connectivity_loss_coefficient", type=float, default=30.0)
     parser.add_argument("--smoothing", type=float, default=1e-14)
     parser.add_argument("--rel_sample_negatives", type=int, default=80)
     parser.add_argument("--rel_sample_nonmatching", type=int, default=80)
-    parser.add_argument(
-        "--rel_sample_negatives_largest", type=str2bool, default=True
-    )  # OI: True
-    parser.add_argument(
-        "--rel_sample_nonmatching_largest", type=str2bool, default=True
-    )  # OI: False
+    parser.add_argument("--rel_sample_negatives_largest", type=str2bool, default=True)
+    parser.add_argument("--rel_sample_nonmatching_largest", type=str2bool, default=True)
 
     # Training
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--accumulate", type=int, default=2)
-    parser.add_argument("--gpus", type=int, default=1)  # change to 1
+    parser.add_argument("--accumulate", type=int, default=8)
+    parser.add_argument("--gpus", type=int, default=1)
     parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--max_epochs_finetune", type=int, default=25)
     parser.add_argument("--lr_backbone", type=float, default=2e-7)
     parser.add_argument("--lr", type=float, default=2e-6)
-    parser.add_argument("--lr_initialized", type=float, default=2e-4)  # for pretrained
+    parser.add_argument("--lr_initialized", type=float, default=2e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--gradient_clip_val", type=float, default=0.1)
-
     parser.add_argument("--debug", type=str2bool, default=False)
     parser.add_argument("--resume", type=str2bool, default=True)
     parser.add_argument("--memo", type=str, default="")
     parser.add_argument("--version", type=int, default=1)
     parser.add_argument("--patience", type=int, default=15)
     parser.add_argument("--finetune", type=str2bool, default=True)
-
-    parser.add_argument(
-        "--filter_duplicate_rels", type=str2bool, default=True
-    )  # for OI
-    parser.add_argument("--filter_multiple_rels", type=str2bool, default=True)  # for OI
+    parser.add_argument("--filter_duplicate_rels", type=str2bool, default=True)
+    parser.add_argument("--filter_multiple_rels", type=str2bool, default=True)
     parser.add_argument("--use_freq_bias", type=str2bool, default=True)
     parser.add_argument("--use_log_softmax", type=str2bool, default=False)
 
@@ -643,24 +625,53 @@ if __name__ == "__main__":
     parser.add_argument("--eval_when_train_end", type=str2bool, default=True)
     parser.add_argument("--eval_single_preds", type=str2bool, default=True)
     parser.add_argument("--eval_multiple_preds", type=str2bool, default=False)
-
     parser.add_argument("--logit_adjustment", type=str2bool, default=False)
     parser.add_argument("--logit_adj_tau", type=float, default=0.3)
 
     # Speed up
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--precision", type=int, default=32, choices=[16, 32])
-
-    parser.add_argument("--hierarchical", type=bool, default=False)
+    parser.add_argument("--hierarchical", type=str2bool, default=False)
     parser.add_argument("--num_geometric", type=int, default=15)
     parser.add_argument("--num_possessive", type=int, default=11)
     parser.add_argument("--num_semantic", type=int, default=24)
     parser.add_argument("--num_negatives", type=int, default=49)
     parser.add_argument("--super_weight", type=int, default=1)
-    parser.add_argument("--train_head", type=bool, default=False)
+    parser.add_argument("--train_head", type=str2bool, default=False)
     parser.add_argument("--artifact_path", type=str, default="")
 
+    return parser
+
+
+def parse_args():
+    # 1) Parse only --config first (avoid required errors)
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=str, default=None)
+    config_args, _ = config_parser.parse_known_args()
+
+    parser = build_parser(config_parser)
+
+    if config_args.config:
+        with open(config_args.config, "r") as f:
+            cfg = yaml.safe_load(f) or {}
+        # Optional: warn on unknown keys
+        valid_keys = {a.dest for a in parser._actions}
+        unknown = set(cfg) - valid_keys
+        if unknown:
+            print(
+                f"Warning: unknown config keys ignored: {sorted(unknown)}",
+                file=sys.stderr,
+            )
+
+        parser.set_defaults(**{k: v for k, v in cfg.items() if k in valid_keys})
+
+    # CLI overrides config.yaml
     args = parser.parse_args()
+    return args
+
+
+if __name__ == "__main__":
+    args = parse_args()
     if args.from_scratch:
         args.pretrained = args.architecture
 
@@ -784,6 +795,10 @@ if __name__ == "__main__":
         name += f"__{args.memo}"
     if args.debug:
         name += "__debug"
+    if args.hierarchical:
+        name += "__hier"
+    if args.train_head:
+        name += "train_rel_head"
     if args.resume:
         version = args.version  # for resuming
     else:
@@ -793,7 +808,9 @@ if __name__ == "__main__":
     tensorboard_logger = TensorBoardLogger(save_dir, name=name, version=version)
 
     # initialize wandblogger
-    wandb_logger = WandbLogger(project="hier-egtr", log_model="all", save_dir="./logs")
+    wandb_logger = WandbLogger(
+        project="hier-egtr", log_model="all", save_dir="./logs", name=name
+    )
 
     logger_list = [tensorboard_logger, wandb_logger]
     if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints"):
@@ -806,14 +823,15 @@ if __name__ == "__main__":
             )[-1]
     else:
         ckpt_path = None
+    print(f"ckpt_path for resume: {ckpt_path}")
     # Module
     module = SGG(
         architecture=args.architecture,
         backbone_dirpath=args.backbone_dirpath,
         auxiliary_loss=args.auxiliary_loss,
-        lr=args.lr*0.05,
-        lr_backbone=args.lr_backbone*0.05,
-        lr_initialized=args.lr_initialized*0.05,
+        lr=args.lr,
+        lr_backbone=args.lr_backbone,
+        lr_initialized=args.lr_initialized,
         weight_decay=args.weight_decay,
         pretrained=args.pretrained,
         main_trained="",
@@ -861,7 +879,14 @@ if __name__ == "__main__":
     early_stop_callback = EarlyStopping(
         monitor="validation_loss", patience=args.patience, verbose=True, mode="min"
     )
-    lr_monitor_callback = LearningRateMonitor(logging_interval="step")
+    lr_monitor_callback = LearningRateMonitor(logging_interval="epoch")
+
+    visualize_imgs = GTTripletVis(
+        dataset=train_dataset,
+        id2label=id2label,
+        rel_categories=rel_categories,
+        freq=1,
+    )
 
     # Train
     trainer = None
@@ -872,7 +897,6 @@ if __name__ == "__main__":
                 save_dir, name=f"{name}__finetune", version=version
             ).log_dir
         ).exists():
-            # Training
             trainer = Trainer(
                 precision=args.precision,
                 logger=logger_list,
@@ -893,7 +917,7 @@ if __name__ == "__main__":
                 print("### Main training")
             if ckpt_path is not None:
                 print(f"### Resume training from {ckpt_path}")
-            trainer.fit(module, ckpt_path=ckpt_path) # no resume
+            trainer.fit(module, ckpt_path=ckpt_path)
 
             try:
                 os.chmod(tensorboard_logger.log_dir, 0o0777)
@@ -920,9 +944,9 @@ if __name__ == "__main__":
                 architecture=args.architecture,
                 backbone_dirpath=args.backbone_dirpath,
                 auxiliary_loss=args.auxiliary_loss,
-                lr=args.lr * 0.05,  # change lr
-                lr_backbone=args.lr_backbone * 0.05,
-                lr_initialized=args.lr_initialized * 0.05,
+                lr=args.lr * 0.1,
+                lr_backbone=args.lr_backbone,
+                lr_initialized=args.lr_initialized,
                 weight_decay=args.weight_decay,
                 pretrained=args.pretrained,
                 main_trained=ckpt_path,

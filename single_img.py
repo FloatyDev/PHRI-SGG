@@ -11,14 +11,64 @@ from model.deformable_detr import DeformableDetrConfig, DeformableDetrFeatureExt
 from model.egtr import DetrForSceneGraphGeneration
 from data.visual_genome import VGDataset
 from lib.pytorch_misc import argsort_desc
-from transformers.models.detr.feature_extraction_detr import (
-    center_to_corners_format,
-)
+from transformers.image_transforms import center_to_corners_format
 
 # Visualization
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+@torch.no_grad()
+def target_to_triplets(
+    target: dict,
+    image,                       # PIL.Image so we know the real W×H
+    id2label: dict,              # {class_id: "cat", …}
+    rel_categories: list,        # ["on", "under", …] len = R
+    topk: int = 0
+    ):
+    """
+    Convert VG ground-truth “target” into a list of human-readable triplets.
+
+    Returns
+    -------
+    triplets : List[dict]
+        [
+          {"subject": "man",
+           "sub_bbox": [x1,y1,x2,y2],
+           "predicate": "holding",
+           "object": "umbrella",
+           "obj_bbox": [x1,y1,x2,y2],
+           "score": 1.0},
+        ]
+    """
+    # ---- unpack & prepare --------------------------------------------------
+    boxes_cxcywh = target["boxes"].cpu()                  # (N_obj,4) norm.
+    W, H = image.width, image.height
+    boxes_xyxy = rescale_bboxes(boxes_cxcywh, (W, H))     # tensor [...,4]
+
+    obj_labels = target["class_labels"].cpu()             # (N_obj,)
+    rel_tensor = target["rel"].cpu()                      # (N_obj,N_obj,R)
+
+    # all non-zero entries: (sub_idx, obj_idx, rel_id)
+    trip_idx = torch.nonzero(rel_tensor, as_tuple=False)  # (N_trip,3)
+
+    if topk is not None:
+        trip_idx = trip_idx[:topk]
+
+    # ---- build list --------------------------------------------------------
+    triplets = []
+    for sub_idx, obj_idx, rel_id in trip_idx:
+        triplets.append(
+            {
+                "subject":   id2label[int(obj_labels[sub_idx])],
+                "sub_bbox":  boxes_xyxy[sub_idx].tolist(),
+                "predicate": rel_categories[int(rel_id)],
+                "object":    id2label[int(obj_labels[obj_idx])],
+                "obj_bbox":  boxes_xyxy[obj_idx].tolist(),
+                "score":     1.0,                       # GT has no prob
+            }
+        )
+
+    return triplets
 
 def infer_single_image(outputs, image, num_labels, rel_categories, id2label, topk=10):
     """Perform inference on a single image and return formatted triplets.
@@ -218,7 +268,10 @@ def parse_arguments():
     parser.add_argument("--num_workers", type=int, default=4)
     # Visualization
     parser.add_argument(
-        "--image_path", type=str, default="./times-square-new-york-city-new-york-america.jpg", help="Input image path"
+        "--image_path",
+        type=str,
+        default="./times-square-new-york-city-new-york-america.jpg",
+        help="Input image path",
     )
     parser.add_argument(
         "--output_json", type=str, default="scene_graph.json", help="Output JSON path"
@@ -294,11 +347,15 @@ def main():
     rel_categories = test_dataset.rel_categories
     num_labels = max(id2label.keys()) + 1
 
-    triplets = infer_single_image(outputs, image, num_labels, rel_categories, id2label)
-
-    # Save results to JSON
-    with open(args.output_json, "w") as f:
-        json.dump(triplets, f, indent=4, cls=NumpyEncoder)
+    if args.infer:
+        triplets = infer_single_image(
+            outputs, image, num_labels, rel_categories, id2label
+        )
+    else:
+        triplets = target_to_triplets()
+        # Save results to JSON
+        with open(args.output_json, "w") as f:
+            json.dump(triplets, f, indent=4, cls=NumpyEncoder)
 
     draw_relation_boxes(image, triplets)
 

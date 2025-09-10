@@ -175,6 +175,10 @@ class BayesianRelationClassifier(nn.Module):
         det_logits,  # class logits: (bsz, N, num_classes)
     ):
         B, N, _, D = features.shape
+
+        assert features.dim() == 4, f"Expected 4D tensor, got {features.dim()}D"
+        assert features.shape[1] == features.shape[2], "Expected square relation matrix"
+
         if self.use_class_context:
             with torch.no_grad():
                 class_prob = det_logits.softmax(-1)
@@ -264,6 +268,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         if kwargs.get("fg_matrix", None) is not None:  # when training
             eps = config.freq_bias_eps
             fg_matrix = kwargs.get("fg_matrix", None)
+            self.fg_matrix = fg_matrix
             rel_dist = torch.FloatTensor(
                 (fg_matrix.sum(axis=(0, 1))) / (fg_matrix.sum() + eps)
             )
@@ -548,17 +553,15 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 eos_coef=self.config.eos_coefficient,
                 losses=losses,
                 smoothing=self.config.smoothing,
-                rel_sample_negatives=self.config.rel_sample_negatives,
-                rel_sample_nonmatching=self.config.rel_sample_nonmatching,
+                rel_sample_negatives=None,
+                rel_sample_nonmatching=None,
                 model_training=self.training,
                 focal_alpha=self.config.focal_alpha,
                 rel_sample_negatives_largest=self.config.rel_sample_negatives_largest,
                 rel_sample_nonmatching_largest=self.config.rel_sample_nonmatching_largest,
                 hierarchical=self.config.hierarchical,
-                num_geometric=self.config.num_geometric,
-                num_possessive=self.config.num_possessive,
-                num_semantic=self.config.num_semantic,
                 super_weight=self.config.super_weight,
+                fg_matrix=self.fg_matrix,
             )
 
             criterion.to(self.device)
@@ -581,7 +584,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                     "pred_boxes": enc_outputs_coord,
                 }
 
-            loss_dict = criterion(outputs_loss, labels)
+            loss_dict, hier_rel_dict = criterion(outputs_loss, labels)
 
             # Fourth: compute total loss, as a weighted sum of the various losses
             weight_dict = {
@@ -620,7 +623,8 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
 
             for i, v in zip(log_layers, rel_gate):
                 loss_dict[f"rel_gate_{i}"] = v
-
+            if hier_rel_dict:
+                loss_dict.update(hier_rel_dict)
         # from <structured sparse rcnn>, post-hoc logit adjustment.
         # reference: https://github.com/google-research/google-research/blob/master/logit_adjustment/main.py#L136-L140
         if self.config.logit_adjustment and not self.hierarchical:
@@ -681,10 +685,8 @@ class SceneGraphGenerationLoss(nn.Module):
         rel_sample_negatives_largest,
         rel_sample_nonmatching_largest,
         # Add hierarchical parameters
+        fg_matrix,
         hierarchical=False,
-        num_geometric=15,
-        num_possessive=11,
-        num_semantic=24,
         super_weight=1.0,  # weight of super relation at general rel loss sum
     ):
         """
@@ -809,6 +811,46 @@ class SceneGraphGenerationLoss(nn.Module):
             self.num_possessive = len(fam_lists[1])
             self.num_semantic = len(fam_lists[2])
             self.super_weight = super_weight
+
+            def class_balanced_weights(
+                counts: torch.Tensor, beta: float = 0.9999, eps: float = 1e-12
+            ):
+                # counts: [K] (can be zero)
+                eff_num = 1.0 - torch.pow(beta, counts.clamp(min=0))
+                w = (1.0 - beta) / (eff_num + eps)  # larger for rarer classes
+                w = w / w.mean()  # normalize to mean=1 to keep loss scale stable
+                return w
+
+            if fg_matrix is not None:
+                rel_counts = torch.from_numpy(fg_matrix.sum(axis=(0, 1))).float()  # [R]
+
+                fam_map = torch.tensor(self.super_relation_map, dtype=torch.long)
+                mask_geo = fam_map == 0
+                mask_poss = fam_map == 1
+                mask_sem = fam_map == 2
+
+                w_geo = class_balanced_weights(rel_counts[mask_geo], beta=0.9999)
+                w_poss = class_balanced_weights(rel_counts[mask_poss], beta=0.9999)
+                w_sem = class_balanced_weights(rel_counts[mask_sem], beta=0.9999)
+                # Register as buffers so they move with .to(device) and save in checkpoints
+                self.register_buffer("w_geo", w_geo, persistent=True)
+                self.register_buffer("w_poss", w_poss, persistent=True)
+                self.register_buffer("w_sem", w_sem, persistent=True)
+            else:
+                self.register_buffer(
+                    "w_geo", torch.ones(self.num_geometric), persistent=True
+                )
+                self.register_buffer(
+                    "w_poss", torch.ones(self.num_possessive), persistent=True
+                )
+                self.register_buffer(
+                    "w_sem", torch.ones(self.num_semantic), persistent=True
+                )
+
+            self.geo_loss = nn.NLLLoss(weight=self.w_geo, reduction="none")
+            self.poss_loss = nn.NLLLoss(weight=self.w_poss, reduction="none")
+            self.sem_loss = nn.NLLLoss(weight=self.w_sem, reduction="none")
+            self.super_loss = nn.NLLLoss(reduction="none")
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -966,6 +1008,11 @@ class SceneGraphGenerationLoss(nn.Module):
     def loss_relations(self, outputs, targets, indices, matching_costs, num_boxes):
         losses = []
         connect_losses = []
+        geo_losses = []
+        sem_losses = []
+        poss_losses = []
+        super_losses = []
+
         for i, ((src_index, target_index), target, matching_cost) in enumerate(
             zip(indices, targets, matching_costs)
         ):
@@ -991,11 +1038,16 @@ class SceneGraphGenerationLoss(nn.Module):
 
             if self.hierarchical:
                 # Unpack hierarchical predictions
-                pred_geo, pred_poss, pred_sem, pred_super, _ = outputs["pred_rel"]
-                pred_geo = pred_geo[i, full_src_index][:, full_src_index]
-                pred_poss = pred_poss[i, full_src_index][:, full_src_index]
-                pred_sem = pred_sem[i, full_src_index][:, full_src_index]
-                pred_super = pred_super[i, full_src_index][:, full_src_index]
+                if isinstance(outputs["pred_rel"], tuple):
+                    pred_geo, pred_poss, pred_sem, pred_super, _ = outputs["pred_rel"]
+                    pred_geo = pred_geo[i, full_src_index][:, full_src_index]
+                    pred_poss = pred_poss[i, full_src_index][:, full_src_index]
+                    pred_sem = pred_sem[i, full_src_index][:, full_src_index]
+                    pred_super = pred_super[i, full_src_index][:, full_src_index]
+                else:
+                    raise ValueError(
+                        "Hierarchical mode expects tuple from relationship predictor"
+                    )
             else:
                 # flat prediction
                 pred_rel = outputs["pred_rel"][i, full_src_index][
@@ -1031,10 +1083,14 @@ class SceneGraphGenerationLoss(nn.Module):
                         target_rel,
                         full_matching_cost,
                         self.rel_sample_negatives,
-                        self.rel_sample_nonmatching
+                        self.rel_sample_nonmatching,
                     )
                 )
                 loss = geo_loss + poss_loss + sem_loss + self.super_weight * super_loss
+                geo_losses.append(geo_loss)
+                poss_losses.append(poss_loss)
+                sem_losses.append(sem_loss)
+                super_losses.append(super_loss)
             else:
                 # Original flat relationship loss
                 if self.model_training:
@@ -1050,13 +1106,22 @@ class SceneGraphGenerationLoss(nn.Module):
                         pred_rel, target_rel, full_matching_cost, None, None
                     )
             losses.append(loss)
-
-        return {
+        main_loss_dict = {
             "loss_rel": torch.stack(
                 losses
             ).mean(),  # maybe use cat and ajdust dimension of loss.view(-1)/loss.unsqueeze(-1)
             "loss_connectivity": torch.stack(connect_losses).mean(),
         }
+
+        if self.hierarchical:
+            self.hierarchical_losses = {
+                "geo_loss": torch.stack(geo_losses).mean(),
+                "poss_loss": torch.stack(poss_losses).mean(),
+                "sem_loss": torch.stack(sem_losses).mean(),
+                "super_loss": torch.stack(super_losses).mean(),
+            }
+
+        return main_loss_dict
 
     def _select_relation_indices(
         self,
@@ -1142,11 +1207,6 @@ class SceneGraphGenerationLoss(nn.Module):
         assert pred_poss.size(-1) == self.num_possessive
         assert pred_sem.size(-1) == self.num_semantic
 
-        # tgt_geo = target_rel[..., : self.num_geometric]
-        # tgt_poss = target_rel[
-        #    ..., self.num_geometric : self.num_geometric + self.num_possessive
-        # ]
-        # tgt_sem = target_rel[..., self.num_geometric + self.num_possessive :]
         tgt_geo = target_rel.new_zeros(
             (target_rel.size(0), target_rel.size(0), self.num_geometric)
         )
@@ -1170,11 +1230,15 @@ class SceneGraphGenerationLoss(nn.Module):
             if (fam == 2).any():
                 tgt_sem[i[fam == 2], j[fam == 2], fam_idx[fam == 2]] = 1.0
 
-        w_obj = 1.0 - matching_cost.sigmoid()
+        w_obj = 1.0 - matching_cost.sigmoid().detach()
         w_pair = torch.outer(w_obj, w_obj)  # NxN
 
         # super-relation loss
         mask_rel = target_rel.sum(-1) > 0  # NxN
+        ij = mask_rel.nonzero(as_tuple=False)
+        assert torch.equal(pred_super[mask_rel], pred_super[ij[:, 0], ij[:, 1]])
+        assert torch.equal(target_rel[mask_rel], target_rel[ij[:, 0], ij[:, 1]])
+
         if mask_rel.any():
             rel_idx = target_rel[mask_rel].argmax(-1)
             super_tgt = self.orig2fam[rel_idx]  # 0/1/2
@@ -1405,6 +1469,11 @@ class SceneGraphGenerationLoss(nn.Module):
                 )
             )
 
+        hier_losses = None
+        if hasattr(self, "hierarchical_losses") and self.hierarchical:
+            hier_losses = self.hierarchical_losses
+            delattr(self, "hierarchical_losses")
+
         if "pred_rels" in outputs:
             for pred_rel in outputs["pred_rels"]:
                 outputs["pred_rel"] = pred_rel
@@ -1448,4 +1517,4 @@ class SceneGraphGenerationLoss(nn.Module):
                 l_dict = {k + "_enc": v for k, v in l_dict.items()}
                 losses.update(l_dict)
 
-        return losses
+        return losses, hier_losses
