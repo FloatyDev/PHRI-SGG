@@ -34,7 +34,7 @@ gradient_clip_val: 0.1
 debug: false
 resume: true
 memo: ""
-version: 1
+version: 0
 patience: 15
 finetune: true
 filter_duplicate_rels: true
