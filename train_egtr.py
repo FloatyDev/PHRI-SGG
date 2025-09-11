@@ -798,7 +798,7 @@ if __name__ == "__main__":
     if args.hierarchical:
         name += "__hier"
     if args.train_head:
-        name += "train_rel_head"
+        name += "__train_rel_head"
     if args.resume:
         version = args.version  # for resuming
     else:
