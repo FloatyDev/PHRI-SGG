@@ -1017,7 +1017,7 @@ if __name__ == "__main__":
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Finetune with smaller lr")
-            trainer.fit(module, ckpt_path=None)
+            trainer.fit(module, ckpt_path=finetune_ckpt_path)
 
         if trainer is not None:
             if torch.distributed.is_initialized():
