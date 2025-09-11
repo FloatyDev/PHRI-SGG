@@ -813,7 +813,7 @@ class SceneGraphGenerationLoss(nn.Module):
             self.super_weight = super_weight
 
             def class_balanced_weights(
-                counts: torch.Tensor, beta: float = 0.9999, eps: float = 1e-12
+                counts: torch.Tensor, beta: float = 0.99, eps: float = 1e-12
             ):
                 # counts: [K] (can be zero)
                 eff_num = 1.0 - torch.pow(beta, counts.clamp(min=0))
