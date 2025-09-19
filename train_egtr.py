@@ -273,6 +273,7 @@ class SGG(pl.LightningModule):
         super_weight,
         train_relation_head=False,
         artifact_path="",
+        use_class_context=False,
     ):
 
         super().__init__()
@@ -308,6 +309,7 @@ class SGG(pl.LightningModule):
         config.num_semantic = num_semantic
         config.num_negatives = num_negatives
         config.super_weight = super_weight
+        config.use_class_context = use_class_context
 
         self.config = config
 
@@ -678,6 +680,7 @@ def build_parser(parser):
     parser.add_argument("--train_head", type=str2bool, default=False)
     parser.add_argument("--artifact_path", type=str, default="")
     parser.add_argument("--load_model", type=str, default="")
+    parser.add_argument("--use_class_context", type=str2bool, default=False)
 
     return parser
 
@@ -907,6 +910,7 @@ if __name__ == "__main__":
         super_weight=args.super_weight,
         train_relation_head=args.train_head,
         artifact_path=args.artifact_path,
+        use_class_context=args.use_class_context,
     )
 
     # Callback
@@ -956,6 +960,7 @@ if __name__ == "__main__":
                 devices=args.gpus,
                 accelerator="gpu",
                 max_epochs=args.max_epochs,
+                val_check_interval=0.5,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
                 callbacks=[
@@ -971,6 +976,7 @@ if __name__ == "__main__":
                 print("### Main training")
             if ckpt_path is not None:
                 print(f"### Resume training from {ckpt_path}")
+            module.model.train()
             trainer.fit(module, ckpt_path=ckpt_path)
 
             try:
@@ -1036,6 +1042,7 @@ if __name__ == "__main__":
                 num_negatives=args.num_negatives,
                 super_weight=args.super_weight,
                 train_relation_head=args.train_head,
+                use_class_context=args.use_class_context,
             )
 
             # Finetune callback
@@ -1059,6 +1066,7 @@ if __name__ == "__main__":
                 devices=args.gpus,
                 accelerator="gpu",
                 max_epochs=args.max_epochs_finetune,
+                val_check_interval=0.5,
                 gradient_clip_val=args.gradient_clip_val,
                 strategy=DDPStrategy(find_unused_parameters=False),
                 callbacks=[
@@ -1071,7 +1079,9 @@ if __name__ == "__main__":
             use_deterministic_algorithms()
             if trainer.is_global_zero:
                 print("### Finetune with smaller lr")
-            trainer.fit(module, ckpt_path=finetune_ckpt_path)
+
+            module.model.train()
+            trainer.fit(module, ckpt_path=None)
 
         if trainer is not None:
             if torch.distributed.is_initialized():
