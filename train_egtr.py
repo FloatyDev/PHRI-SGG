@@ -713,7 +713,9 @@ def parse_args():
 
 
 if __name__ == "__main__":
+
     args = parse_args()
+
     if args.from_scratch:
         args.pretrained = args.architecture
 
@@ -851,7 +853,7 @@ if __name__ == "__main__":
 
     # initialize wandblogger
     wandb_logger = WandbLogger(
-        project="hier-egtr", log_model=False, save_dir="./logs", name=name
+        project="hier-egtr_family_classifier", log_model=False, save_dir="./logs", name=name
     )
     ipdb.set_trace()
     logger_list = [tensorboard_logger, wandb_logger]

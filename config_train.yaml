@@ -15,8 +15,8 @@ ce_loss_coefficient: 2.0
 rel_loss_coefficient: 15.0
 connectivity_loss_coefficient: 30.0
 smoothing: 1.0e-14
-rel_sample_negatives: 80
-rel_sample_nonmatching: 80
+rel_sample_negatives:
+rel_sample_nonmatching:
 rel_sample_negatives_largest: true
 rel_sample_nonmatching_largest: true
 
@@ -41,12 +41,12 @@ filter_duplicate_rels: true
 filter_multiple_rels: true
 use_freq_bias: true
 use_log_softmax: false
-use_class_context: true
-load_model: ./results/egtr__pretrained_detr__SenseTime__deformable-detr__batch__32__epochs__150_50__lr__1e-05_0.0001__visual_genome__finetune__version_0/batch__4__epochs__50_25__lr_bbone__2e-07__lr2e-06__lr_init1e-06__uniformly_balanced_superprob__hier__train_rel_head/version_0/
+use_class_context: false
+load_model: 
 
 # Evaluation
 skip_train: false
-split: "test"  # choices: val, test
+split: "val"  # choices: val, test
 eval_batch_size: 1
 eval_when_train_end: true
 eval_single_preds: true
