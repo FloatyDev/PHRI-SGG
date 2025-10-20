@@ -49,66 +49,58 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch.set_float32_matmul_precision("medium")
 
 
-def build_flat_pred_rel(geo, poss, sem, orig2fam, orig2famidx):
-    N = geo.shape[0]
-    num_rel_classes = len(orig2fam)
-    pred_rel = torch.zeros((N, N, num_rel_classes), device=geo.device)
-
-    orig2fam = torch.as_tensor(orig2fam)  # to do element-wise comparison
-
-    fam_mask_geo = orig2fam == 0
-    fam_mask_poss = orig2fam == 1
-    fam_mask_sem = orig2fam == 2
-
-    pred_rel[..., fam_mask_geo] = geo[..., orig2famidx[fam_mask_geo]]
-    pred_rel[..., fam_mask_poss] = poss[..., orig2famidx[fam_mask_poss]]
-    pred_rel[..., fam_mask_sem] = sem[..., orig2famidx[fam_mask_sem]]
-
-    return pred_rel
-
-
 # Reference: https://github.com/yuweihao/KERN/blob/master/models/eval_rels.py
 def evaluate_batch(
     outputs,
     targets,
-    multiple_sgg_evaluator,
-    multiple_sgg_evaluator_list,
-    single_sgg_evaluator,
-    single_sgg_evaluator_list,
-    oi_evaluator,
+    family_sgg_evaluator,
+    family_sgg_evaluator_list,
     num_labels,
     max_topk=100,
     hierarchical=True,
-    orig2fam=None,
-    orig2famidx=None,
 ):
-    for j, target in enumerate(targets):
-        # Pred
-        if hierarchical:
-            ipdb.set_trace()
-            geo, poss, sem, super, _ = outputs["pred_rel"]
-            geo = geo[0].exp()
-            poss = poss[0].exp()
-            sem = sem[0].exp()
-            super = super[0].exp()
-            pred_rel = build_flat_pred_rel(geo, poss, sem, orig2fam, orig2famidx)
-        else:
-            pred_rel = torch.clamp(outputs["pred_rel"][j], 0.0, 1.0)
+    assert hierarchical, "This evaluate_batch version is for hierarchical/family-only evaluation"
 
-        pred_logits = outputs["logits"][j]
+    orig2fam = get_super_rel_map()
+
+    for j, target in enumerate(targets):
+
+        pred_obj_logits = outputs["logits"][j]       # Object logits (N, num_obj_classes)
+        pred_boxes = outputs["pred_boxes"][j]       # Predicted boxes (N, 4)
+        pred_super_scores = outputs["pred_rel"][j]  # Family relation scores (N, N, 3) - logits or logprobs
+        pred_super_probs = pred_super_scores.exp()
+
         obj_scores, pred_classes = torch.max(
-            pred_logits.softmax(-1)[:, :num_labels], -1
+            pred_obj_logits.softmax(-1)[:, :num_labels], -1
         )
         sub_ob_scores = torch.outer(obj_scores, obj_scores)
         sub_ob_scores[
-            torch.arange(pred_logits.size(0)), torch.arange(pred_logits.size(0))
+            torch.arange(pred_obj_logits.size(0)), torch.arange(pred_obj_logits.size(0))
         ] = 0.0  # prevent self-connection
 
-        pred_boxes = outputs["pred_boxes"][j]
         if "pred_connectivity" in outputs:
             pred_connectivity = torch.clamp(outputs["pred_connectivity"][j], 0.0, 1.0)
-            pred_rel = torch.mul(pred_rel, pred_connectivity)
+            pred_super_probs = torch.mul(pred_super_probs, pred_connectivity)
 
+        triplet_scores = torch.mul(pred_super_probs.max(-1)[0], sub_ob_scores)
+        pred_rel_inds = argsort_desc(triplet_scores.cpu().clone().numpy())[
+            :max_topk, :
+        ]  # [pred_rels, 2(s,o)]
+        rel_scores = (
+            pred_super_probs.cpu().clone().numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1]]
+        )  # [pred_rels, 50]
+
+        pred_entry = {
+            "pred_boxes": rescale_bboxes(
+                pred_boxes.cpu(), torch.flip(orig_size, dims=[0])
+            )
+            .clone()
+            .numpy(),
+            "pred_classes": pred_classes.cpu().clone().numpy(),
+            "obj_scores": obj_scores.cpu().clone().numpy(),
+            "pred_rel_inds": pred_rel_inds,
+            "rel_scores": rel_scores,
+        }
         # GT
         orig_size = target["orig_size"]
         target_labels = target["class_labels"]  # [num_objs]
@@ -116,103 +108,38 @@ def evaluate_batch(
 
         target_rel = target["rel"].nonzero()  # [num_rels, 3(s, o, p)]
 
+        if target_rel.numel() > 0:
+            gt_rels_idx = target_rel[:, 2]
+            gt_fam_idx = orig2fam[gt_rels_idx]
+            gt_family_triplets = torch.stack(
+                (target_rel[:, 0], target_rel[:, 1], gt_fam_idx), dim=-1
+            )
+        else:
+            gt_family_triplets = torch.zeros(
+                (0, 3), dtype=torch.long, device=target_rel.device
+            )
+
         gt_entry = {
-            "gt_relations": target_rel.clone().numpy(),
+            "gt_relations": gt_family_triplets.clone().numpy(),
             "gt_boxes": rescale_bboxes(target_boxes, torch.flip(orig_size, dims=[0]))
             .clone()
             .numpy(),
             "gt_classes": target_labels.clone().numpy(),
         }
 
-        if multiple_sgg_evaluator is not None:
-            triplet_scores = torch.mul(pred_rel, sub_ob_scores.unsqueeze(-1))
-            pred_rel_inds = argsort_desc(triplet_scores.cpu().clone().numpy())[
-                :max_topk, :
-            ]  # [pred_rels, 3(s,o,p)]
-            rel_scores = (
-                pred_rel.cpu()
-                .clone()
-                .numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1], pred_rel_inds[:, 2]]
-            )  # [pred_rels]
+        family_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(
+            gt_entry, pred_entry
+        )
 
-            pred_entry = {
-                "pred_boxes": rescale_bboxes(
-                    pred_boxes.cpu(), torch.flip(orig_size, dims=[0])
-                )
-                .clone()
-                .numpy(),
-                "pred_classes": pred_classes.cpu().clone().numpy(),
-                "obj_scores": obj_scores.cpu().clone().numpy(),
-                "pred_rel_inds": pred_rel_inds,
-                "rel_scores": rel_scores,
-            }
-            multiple_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(
-                gt_entry, pred_entry
+        for pred_id, _, evaluator_rel in family_sgg_evaluator_list:
+            gt_entry_rel = gt_entry.copy()
+            mask = np.in1d(gt_entry_rel["gt_relations"][:, -1], pred_id)
+            gt_entry_rel["gt_relations"] = gt_entry_rel["gt_relations"][mask, :]
+            if gt_entry_rel["gt_relations"].shape[0] == 0:
+                continue
+            evaluator_rel["sgdet"].evaluate_scene_graph_entry(
+                gt_entry_rel, pred_entry
             )
-
-            for pred_id, _, evaluator_rel in multiple_sgg_evaluator_list:
-                gt_entry_rel = gt_entry.copy()
-                mask = np.in1d(gt_entry_rel["gt_relations"][:, -1], pred_id)
-                gt_entry_rel["gt_relations"] = gt_entry_rel["gt_relations"][mask, :]
-                if gt_entry_rel["gt_relations"].shape[0] == 0:
-                    continue
-                evaluator_rel["sgdet"].evaluate_scene_graph_entry(
-                    gt_entry_rel, pred_entry
-                )
-
-        if single_sgg_evaluator is not None:
-            triplet_scores = torch.mul(pred_rel.max(-1)[0], sub_ob_scores)
-            pred_rel_inds = argsort_desc(triplet_scores.cpu().clone().numpy())[
-                :max_topk, :
-            ]  # [pred_rels, 2(s,o)]
-            rel_scores = (
-                pred_rel.cpu().clone().numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1]]
-            )  # [pred_rels, 50]
-
-            pred_entry = {
-                "pred_boxes": rescale_bboxes(
-                    pred_boxes.cpu(), torch.flip(orig_size, dims=[0])
-                )
-                .clone()
-                .numpy(),
-                "pred_classes": pred_classes.cpu().clone().numpy(),
-                "obj_scores": obj_scores.cpu().clone().numpy(),
-                "pred_rel_inds": pred_rel_inds,
-                "rel_scores": rel_scores,
-            }
-            single_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(
-                gt_entry, pred_entry
-            )
-            for pred_id, _, evaluator_rel in single_sgg_evaluator_list:
-                gt_entry_rel = gt_entry.copy()
-                mask = np.in1d(gt_entry_rel["gt_relations"][:, -1], pred_id)
-                gt_entry_rel["gt_relations"] = gt_entry_rel["gt_relations"][mask, :]
-                if gt_entry_rel["gt_relations"].shape[0] == 0:
-                    continue
-                evaluator_rel["sgdet"].evaluate_scene_graph_entry(
-                    gt_entry_rel, pred_entry
-                )
-
-        if oi_evaluator is not None:  # OI evaluation, return all possible indicies
-            sbj_obj_inds = torch.cartesian_prod(
-                torch.arange(pred_logits.shape[0]), torch.arange(pred_logits.shape[0])
-            )
-            pred_scores = (
-                pred_rel.cpu().clone().numpy().reshape(-1, pred_rel.size(-1))
-            )  # (num_obj * num_obj, num_rel_classes)
-
-            pred_entry = {
-                "pred_boxes": rescale_bboxes(
-                    pred_boxes.cpu(), torch.flip(orig_size, dims=[0])
-                )
-                .clone()
-                .numpy(),
-                "pred_classes": pred_classes.cpu().clone().numpy(),
-                "obj_scores": obj_scores.cpu().clone().numpy(),
-                "sbj_obj_inds": sbj_obj_inds,  # for oi, (num_obj * num_obj, num_rel_classes)
-                "pred_scores": pred_scores,  # for oi, (num_obj * num_obj, num_rel_classes)
-            }
-            oi_evaluator(gt_entry, pred_entry)
 
 
 def collate_fn(batch, feature_extractor):
@@ -853,7 +780,10 @@ if __name__ == "__main__":
 
     # initialize wandblogger
     wandb_logger = WandbLogger(
-        project="hier-egtr_family_classifier", log_model=False, save_dir="./logs", name=name
+        project="hier-egtr_family_classifier",
+        log_model=False,
+        save_dir="./logs",
+        name=name,
     )
     ipdb.set_trace()
     logger_list = [tensorboard_logger, wandb_logger]
@@ -932,20 +862,22 @@ if __name__ == "__main__":
         rel_categories=rel_categories,
         freq=1,
     )
+
     class SaveConfigCallback(Callback):
         def __init__(self, config_path, log_dir):
             self.config_path = config_path
             self.log_dir = log_dir
-            
+
         def on_train_start(self, trainer, pl_module):
             # Only save on rank 0 to avoid race conditions in DDP
             if trainer.global_rank == 0:
                 config_dest = Path(self.log_dir) / "config_train.yaml"
                 shutil.copy2(self.config_path, config_dest)
                 print(f"Saved config to: {config_dest}")
+
     config_callback = SaveConfigCallback(
         config_path="./config_train.yaml",  # Update with your config path
-        log_dir=tensorboard_logger.log_dir
+        log_dir=tensorboard_logger.log_dir,
     )
     # Train
     trainer = None
@@ -969,7 +901,7 @@ if __name__ == "__main__":
                     checkpoint_callback,
                     early_stop_callback,
                     lr_monitor_callback,
-                    config_callback
+                    config_callback,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )

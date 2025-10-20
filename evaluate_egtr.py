@@ -42,8 +42,7 @@ def evaluate(
     model,
     dataloader,
     num_labels,
-    multiple_sgg_evaluator=None,
-    single_sgg_evaluator=None,
+    family_sgg_evaluator=None,
     oi_evaluator=None,
     coco_evaluator=None,
     feature_extractor=None,
@@ -51,16 +50,10 @@ def evaluate(
     metric_dict = {}
     model.eval()
 
-    multiple_sgg_evaluator_list = []  # mR@k (for each rel category)
-    single_sgg_evaluator_list = []
-    if multiple_sgg_evaluator is not None:
+    family_sgg_evaluator_list = []  # mR@k (for each rel category)
+    if family_sgg_evaluator is not None:
         for index, name in enumerate(dataloader.dataset.rel_categories):
-            multiple_sgg_evaluator_list.append(
-                (index, name, BasicSceneGraphEvaluator.all_modes(multiple_preds=True))
-            )
-    if single_sgg_evaluator is not None:
-        for index, name in enumerate(dataloader.dataset.rel_categories):
-            single_sgg_evaluator_list.append(
+            family_sgg_evaluator_list.append(
                 (index, name, BasicSceneGraphEvaluator.all_modes(multiple_preds=False))
             )
 
@@ -76,11 +69,8 @@ def evaluate(
         evaluate_batch(
             outputs,
             targets,
-            multiple_sgg_evaluator,
-            multiple_sgg_evaluator_list,
-            single_sgg_evaluator,
-            single_sgg_evaluator_list,
-            oi_evaluator,
+            family_sgg_evaluator,
+            family_sgg_evaluator_list,
             num_labels,
         )
         if coco_evaluator is not None:
@@ -102,18 +92,11 @@ def evaluate(
         coco_evaluator.summarize()
         metric_dict.update({"AP50": coco_evaluator.coco_eval["bbox"].stats[1]})
 
-    if multiple_sgg_evaluator is not None:
-        recall = multiple_sgg_evaluator["sgdet"].print_stats()
-        mean_recall = calculate_mR_from_evaluator_list(
-            multiple_sgg_evaluator_list, "sgdet", multiple_preds=True
-        )
-        metric_dict.update(recall)
-        metric_dict.update(mean_recall)
 
-    if single_sgg_evaluator is not None:
-        recall = single_sgg_evaluator["sgdet"].print_stats()
+    if family_sgg_evaluator is not None:
+        recall = family_sgg_evaluator["sgdet"].print_stats()
         mean_recall = calculate_mR_from_evaluator_list(
-            single_sgg_evaluator_list, "sgdet", multiple_preds=False
+            family_sgg_evaluator_list, "sgdet", multiple_preds=False
         )
         recall = {f"(single){key}": value for key, value in recall.items()}
         mean_recall = {f"(single){key}": value for key, value in mean_recall.items()}
@@ -217,12 +200,8 @@ if __name__ == "__main__":
     )
 
     # Evaluator
-    multiple_sgg_evaluator = None
-    single_sgg_evaluator = None
-    if args.eval_multiple_preds:
-        multiple_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=True)
-    if args.eval_single_preds:
-        single_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=False)
+    if args.eval_single_preds: # Use this flag for graph constraint evaluation
+        family_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=False)
 
     # Model
     config = DeformableDetrConfig.from_pretrained(args.artifact_path)
@@ -263,8 +242,7 @@ if __name__ == "__main__":
             model,
             test_dataloader,
             max(id2label.keys()) + 1,
-            multiple_sgg_evaluator,
-            single_sgg_evaluator,
+            family_sgg_evaluator,
             oi_evaluator,
             coco_evaluator,
             feature_extractor,
