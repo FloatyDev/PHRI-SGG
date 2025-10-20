@@ -59,16 +59,22 @@ def evaluate_batch(
     max_topk=100,
     hierarchical=True,
 ):
-    assert hierarchical, "This evaluate_batch version is for hierarchical/family-only evaluation"
+    assert (
+        hierarchical
+    ), "This evaluate_batch version is for hierarchical/family-only evaluation"
 
     orig2fam = get_super_rel_map()
+    device = outputs["logits"].device
 
     for j, target in enumerate(targets):
 
-        pred_obj_logits = outputs["logits"][j]       # Object logits (N, num_obj_classes)
-        pred_boxes = outputs["pred_boxes"][j]       # Predicted boxes (N, 4)
-        pred_super_scores = outputs["pred_rel"][j]  # Family relation scores (N, N, 3) - logits or logprobs
+        pred_obj_logits = outputs["logits"][j]  # Object logits (N, num_obj_classes)
+        pred_boxes = outputs["pred_boxes"][j]  # Predicted boxes (N, 4)
+        pred_super_scores = outputs["pred_rel"][
+            j
+        ]  # Family relation scores (N, N, 3) - logits or logprobs
         pred_super_probs = pred_super_scores.exp()
+        orig_size = target["orig_size"].cpu()
 
         obj_scores, pred_classes = torch.max(
             pred_obj_logits.softmax(-1)[:, :num_labels], -1
@@ -87,7 +93,9 @@ def evaluate_batch(
             :max_topk, :
         ]  # [pred_rels, 2(s,o)]
         rel_scores = (
-            pred_super_probs.cpu().clone().numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1]]
+            pred_super_probs.cpu()
+            .clone()
+            .numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1]]
         )  # [pred_rels, 50]
 
         pred_entry = {
@@ -102,15 +110,14 @@ def evaluate_batch(
             "rel_scores": rel_scores,
         }
         # GT
-        orig_size = target["orig_size"]
-        target_labels = target["class_labels"]  # [num_objs]
-        target_boxes = target["boxes"]  # [num_objs, 4]
+        target_labels = target["class_labels"].cpu()  # [num_objs]
+        target_boxes = target["boxes"].cpu()  # [num_objs, 4]
 
-        target_rel = target["rel"].nonzero()  # [num_rels, 3(s, o, p)]
+        target_rel = target["rel"].cpu().nonzero()  # [num_rels, 3(s, o, p)]
 
         if target_rel.numel() > 0:
             gt_rels_idx = target_rel[:, 2]
-            gt_fam_idx = orig2fam[gt_rels_idx]
+            gt_fam_idx = torch.tensor(orig2fam)[gt_rels_idx]
             gt_family_triplets = torch.stack(
                 (target_rel[:, 0], target_rel[:, 1], gt_fam_idx), dim=-1
             )
@@ -127,9 +134,7 @@ def evaluate_batch(
             "gt_classes": target_labels.clone().numpy(),
         }
 
-        family_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(
-            gt_entry, pred_entry
-        )
+        family_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(gt_entry, pred_entry)
 
         for pred_id, _, evaluator_rel in family_sgg_evaluator_list:
             gt_entry_rel = gt_entry.copy()
@@ -137,9 +142,7 @@ def evaluate_batch(
             gt_entry_rel["gt_relations"] = gt_entry_rel["gt_relations"][mask, :]
             if gt_entry_rel["gt_relations"].shape[0] == 0:
                 continue
-            evaluator_rel["sgdet"].evaluate_scene_graph_entry(
-                gt_entry_rel, pred_entry
-            )
+            evaluator_rel["sgdet"].evaluate_scene_graph_entry(gt_entry_rel, pred_entry)
 
 
 def collate_fn(batch, feature_extractor):
