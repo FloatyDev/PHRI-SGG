@@ -200,8 +200,13 @@ if __name__ == "__main__":
     )
 
     # Evaluator
-    if args.eval_single_preds: # Use this flag for graph constraint evaluation
-        family_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=False)
+    family_names = ["geometric", "possessive", "semantic"]
+    family_sgg_evaluator_list = []
+    for index, name in enumerate(family_names):
+        # 'index' will be 0, 1, 2, matching your family IDs
+        family_sgg_evaluator_list.append(
+            (index, name, BasicSceneGraphEvaluator.all_modes(multiple_preds=False)) # Or True, as you need
+        )
 
     # Model
     config = DeformableDetrConfig.from_pretrained(args.artifact_path)
