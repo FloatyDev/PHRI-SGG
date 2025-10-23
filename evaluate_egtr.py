@@ -50,11 +50,17 @@ def evaluate(
     metric_dict = {}
     model.eval()
 
-    family_sgg_evaluator_list = []  # mR@k (for each rel category)
+    family_names = ["geometric", "possessive", "semantic"]
+    family_sgg_evaluator_list = []
     if family_sgg_evaluator is not None:
-        for index, name in enumerate(dataloader.dataset.rel_categories):
+        for index, name in enumerate(family_names):
+            # 'index' will be 0, 1, 2, matching your family IDs
             family_sgg_evaluator_list.append(
-                (index, name, BasicSceneGraphEvaluator.all_modes(multiple_preds=False))
+                (
+                    index,
+                    name,
+                    BasicSceneGraphEvaluator.all_modes(multiple_preds=False),
+                )  # Or True, as you need
             )
 
     for batch in tqdm(dataloader):
@@ -91,7 +97,6 @@ def evaluate(
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
         metric_dict.update({"AP50": coco_evaluator.coco_eval["bbox"].stats[1]})
-
 
     if family_sgg_evaluator is not None:
         recall = family_sgg_evaluator["sgdet"].print_stats()
@@ -200,13 +205,8 @@ if __name__ == "__main__":
     )
 
     # Evaluator
-    family_names = ["geometric", "possessive", "semantic"]
-    family_sgg_evaluator_list = []
-    for index, name in enumerate(family_names):
-        # 'index' will be 0, 1, 2, matching your family IDs
-        family_sgg_evaluator_list.append(
-            (index, name, BasicSceneGraphEvaluator.all_modes(multiple_preds=False)) # Or True, as you need
-        )
+    if args.eval_single_preds:  # Use this flag for graph constraint evaluation
+        family_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=False)
 
     # Model
     config = DeformableDetrConfig.from_pretrained(args.artifact_path)
@@ -221,7 +221,9 @@ if __name__ == "__main__":
     if args.ckpt:
         ckpt_to_load = args.ckpt
     else:
-        assert args.artifact_path, "--artifact_path is required when a ckpt_path is not given explicitely"
+        assert (
+            args.artifact_path
+        ), "--artifact_path is required when a ckpt_path is not given explicitely"
         ckpt_to_load = sorted(
             glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
             key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
