@@ -42,7 +42,8 @@ from model.deformable_detr import (
 from model.egtr import DetrForSceneGraphGeneration
 from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
-from model.util import GTTripletVis, count_trainable, get_super_rel_map, get_orig2idx
+from model.util import GTTripletVis, count_trainable, get_super_rel_map, get_orig2idx, SuperRelationConfusionMatrix
+import wandb
 
 seed_everything(42, workers=True)
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -359,11 +360,11 @@ class SGG(pl.LightningModule):
         )
         loss = outputs.loss
         loss_dict = outputs.loss_dict
-        del outputs
-        return loss, loss_dict
+
+        return loss, loss_dict, outputs
 
     def training_step(self, batch, batch_idx):
-        loss, loss_dict = self.common_step(batch, batch_idx)
+        loss, loss_dict, outputs = self.common_step(batch, batch_idx)
         # logs metrics for each training_step,
         # and the average across the epoch
         # Log metrics directly with epoch aggregation
@@ -377,11 +378,12 @@ class SGG(pl.LightningModule):
         self.validation_step_outputs = []  # Initialize collection list
 
     def validation_step(self, batch, batch_idx):
-        loss, loss_dict = self.common_step(batch, batch_idx)
+        loss, loss_dict, outputs = self.common_step(batch, batch_idx)
         loss_dict["loss"] = loss
 
         self.validation_step_outputs.append(loss_dict)
-        return loss_dict
+
+        return {"loss": loss, "outputs": outputs, "targets": batch["labels"]}
 
     def on_validation_epoch_end(self):
         if not self.validation_step_outputs:
@@ -865,22 +867,39 @@ if __name__ == "__main__":
         rel_categories=rel_categories,
         freq=1,
     )
-
+    cm_callback= SuperRelationConfusionMatrix(id2label=id2label)
     class SaveConfigCallback(Callback):
-        def __init__(self, config_path, log_dir):
-            self.config_path = config_path
-            self.log_dir = log_dir
+     def __init__(self, config_path, log_dir, wandb_logger=None):
+         super().__init__()
+         self.config_path = config_path
+         self.log_dir = log_dir
+         self.wandb_logger = wandb_logger  # Store the logger
 
-        def on_train_start(self, trainer, pl_module):
-            # Only save on rank 0 to avoid race conditions in DDP
-            if trainer.global_rank == 0:
-                config_dest = Path(self.log_dir) / "config_train.yaml"
-                shutil.copy2(self.config_path, config_dest)
-                print(f"Saved config to: {config_dest}")
+     def on_train_start(self, trainer, pl_module):
+         # Only save on rank 0
+         if trainer.global_rank == 0:
+             config_dest = Path(self.log_dir) / "config_train.yaml"
+             if self.config_path and Path(self.config_path).exists():
+                 shutil.copy2(self.config_path, config_dest)
+                 print(f"Saved config locally to: {config_dest}")
+
+                 if self.wandb_logger:
+                     try:
+                         # self.wandb_logger.experiment is the wandb.Run object
+                         # .save() uploads the file to the run's file directory
+                         self.wandb_logger.experiment.save(self.config_path)
+                         print(f"Saved {self.config_path} to wandb cloud.")
+                     except Exception as e:
+                         print(f"Error saving config to wandb: {e}")
+                 else:
+                     print("WandbLogger not provided, config not saved to cloud.")
+             else:
+                 print(f"Config file not found at {self.config_path}, cannot save.")
 
     config_callback = SaveConfigCallback(
         config_path="./config_train.yaml",  # Update with your config path
         log_dir=tensorboard_logger.log_dir,
+        wandb_logger=wandb_logger
     )
     # Train
     trainer = None
@@ -905,6 +924,7 @@ if __name__ == "__main__":
                     early_stop_callback,
                     lr_monitor_callback,
                     config_callback,
+                    cm_callback
                 ],
                 accumulate_grad_batches=args.accumulate,
             )

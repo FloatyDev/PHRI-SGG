@@ -14,6 +14,8 @@ import wandb
 import torch
 from torch import Tensor, nn
 
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 def dice_loss(inputs, targets, num_boxes):
     """
@@ -438,4 +440,108 @@ class GTTripletVis(pl.Callback):
         # ------------------------------------------------------------------ #
         # … inside on_train_batch_end after creating `fig`
         _log_figure(fig, tag="GT_triplets/train", step=global_step, trainer=trainer)
+        plt.close(fig)
+
+class SuperRelationConfusionMatrix(pl.Callback):
+    def __init__(self, id2label, device='cpu'):
+        super().__init__()
+        self.super_cats = ["Geometric", "Possessive", "Semantic"]
+        # Load the mapping 50 -> 3
+        self.orig2fam = torch.tensor(get_super_rel_map(), device=device)
+
+        self.preds = []
+        self.targets = []
+
+    def on_validation_epoch_start(self, trainer, pl_module):
+        # Reset storage at start of epoch
+        self.preds = []
+        self.targets = []
+        # Ensure mapping is on correct device
+        self.orig2fam = self.orig2fam.to(pl_module.device)
+
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+        """
+        outputs: The dict returned from your modified validation_step
+        """
+        model_out = outputs["outputs"]
+        # In your modified egtr.py, pred_rel is purely the super_relation logits (B, N, N, 3)
+        pred_logits = model_out["pred_rel"] 
+        targets = outputs["targets"] # List of dicts
+
+        # 2. Iterate through batch to align Preds with Targets
+        for i, target in enumerate(targets):
+            # Shape: [N_queries, N_queries, 3]
+            # We strictly only care about pairs that HAVE a ground truth relation.
+            # We are testing classification accuracy given detection.
+
+            tgt_rel_matrix = target["rel"] # [N_queries, N_queries, 50] (sparse or dense)
+
+            # Find indices where a relation exists (Foreground)
+            # mask: [N, N] boolean
+            mask = tgt_rel_matrix.sum(dim=-1) > 0 
+
+            if not mask.any():
+                continue
+
+            # --- Extract Predictions ---
+            # Get logits for positive pairs: [Num_Pos, 3]
+            active_preds = pred_logits[i][mask] 
+            pred_fam = active_preds.argmax(dim=-1) # [Num_Pos]
+
+            # --- Extract Targets ---
+            # Get GT vectors: [Num_Pos, 50]
+            active_tgts = tgt_rel_matrix[mask]
+
+            # Convert 50-dim one-hot to index (0-49)
+            # Note: Argmax handles multi-label by picking the first/highest index. 
+            # Acceptable for sanity check.
+            gt_rel_idx = active_tgts.argmax(dim=-1) 
+
+            # Map 0-49 -> 0-2 (Family)
+            gt_fam = self.orig2fam[gt_rel_idx]
+
+            # Store
+            self.preds.append(pred_fam.cpu())
+            self.targets.append(gt_fam.cpu())
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if not self.preds:
+            return
+
+        # Concatenate all batches
+        all_preds = torch.cat(self.preds).numpy()
+        all_targets = torch.cat(self.targets).numpy()
+
+        # Compute Matrix
+        cm = confusion_matrix(
+            all_targets,
+            all_preds,
+            labels=[0, 1, 2], 
+            normalize='true' # Normalize rows (True labels) to sum to 1
+        )
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(8, 6), dpi=120)
+        sns.heatmap(
+            cm, 
+            annot=True, 
+            fmt=".2f", 
+            cmap="Blues",
+            xticklabels=self.super_cats,
+            yticklabels=self.super_cats,
+            ax=ax
+        )
+        ax.set_ylabel('True Label')
+        ax.set_xlabel('Predicted Label')
+        ax.set_title(f'Super-Relation Confusion Matrix (Epoch {trainer.current_epoch})')
+
+        # Log to TensorBoard/WandB
+        if trainer.logger:
+            # Handle multiple loggers (Tensorboard + WandB)
+            loggers = trainer.loggers if hasattr(trainer, 'loggers') else [trainer.logger]
+            for logger in loggers:
+                if isinstance(logger, pl.loggers.WandbLogger):
+                    import wandb
+                    logger.experiment.log({"val/confusion_matrix": wandb.Image(fig)})
+
         plt.close(fig)
