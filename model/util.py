@@ -275,6 +275,32 @@ def get_orig2idx():
 
     return orig2famidx, num_geometric, num_possessive, num_semantic
 
+def get_hierarchical_counts(fg_matrix):
+    """
+    Aggregates fine-grained relation counts into Super-Relation families.
+
+    Args:
+        fg_matrix: Numpy array or Tensor of shape (Num_Obj, Num_Obj, 50).
+                   Contains raw counts of relationships in the dataset.
+
+    Returns:
+        torch.Tensor: Shape (3,) containing [Count_Geometric, Count_Possessive, Count_Semantic]
+    """
+
+    fine_counts = torch.tensor(fg_matrix.sum(axis=(0, 1)), dtype=torch.float32)
+
+    # Mapping shape: [50]
+    mapping = torch.tensor(get_super_rel_map(), device=fine_counts.device)
+
+    family_counts = torch.zeros(3, device=fine_counts.device)
+
+    for i in range(3):
+        mask = (mapping == i)
+        # Sum the counts of all relations in this family
+        family_counts[i] = fine_counts[mask].sum()
+
+    return family_counts
+
 
 class GTTripletVis(pl.Callback):
     """

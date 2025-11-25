@@ -49,6 +49,7 @@ from .util import (
     generalized_box_iou,
     nested_tensor_from_tensor_list,
     sigmoid_focal_loss,
+    get_hierarchical_counts,
 )
 
 
@@ -706,10 +707,15 @@ class SceneGraphGenerationLoss(nn.Module):
                 torch.tensor(self.super_relation_map, dtype=torch.long),
                 persistent=True,
             )
+            family_counts = get_hierarchical_counts(fg_matrix)
+            total_counts = family_counts.sum()
 
-            self.super_weight = super_weight
+            weights = total_counts / (3 * family_counts)
+            weights = weights / weights.mean()
 
-            self.super_loss = nn.NLLLoss(reduction="none")
+            self.register_buffer("class_weights", weights)
+
+            self.super_loss = nn.NLLLoss(weight=self.class_weights, reduction="none")
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
