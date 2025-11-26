@@ -45,6 +45,7 @@ from .deformable_detr import (
     inverse_sigmoid,
 )
 from .util import (
+    FocalLoss,
     dice_loss,
     generalized_box_iou,
     nested_tensor_from_tensor_list,
@@ -186,7 +187,7 @@ class BayesianRelationClassifier(nn.Module):
         hc = combined  # (bsz, N, N, 512)
 
         # Compute outputs
-        super_relation = F.log_softmax(self.fc5(hc), dim=-1)  # (bsz, N, N, 3)
+        super_relation = self.fc5(hc)
 
         return super_relation  # (bsz, N, N, 3)
 
@@ -715,7 +716,13 @@ class SceneGraphGenerationLoss(nn.Module):
 
             self.register_buffer("class_weights", weights)
 
-            self.super_loss = nn.NLLLoss(weight=self.class_weights, reduction="none")
+            self.super_loss = FocalLoss(
+                gamma=2,
+                alpha=self.class_weights,
+                reduction="none",
+                task_type="multi-class",
+                num_classes=3,
+            )
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -991,8 +998,8 @@ class SceneGraphGenerationLoss(nn.Module):
 
             super_loss_vec = self.super_loss(pred_super[mask_rel], super_tgt)
             super_loss = (
-                super_loss_vec * w_pair[mask_rel]
-            ).mean()  # weight with uncertainty of adaptive-smoothing post-loss
+                super_loss_vec.mean()
+            )  # weight with uncertainty of adaptive-smoothing post-loss
         else:
             super_loss = (pred_super * 0).sum()
 
