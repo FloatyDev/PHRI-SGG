@@ -35,7 +35,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.image_transforms import center_to_corners_format
 from transformers.utils import ModelOutput
-from model.util import get_super_rel_map, get_orig2idx
+from model.util import get_super_rel_map, get_orig2idx, get_super_frequency_bias
 
 from .deformable_detr import (
     DeformableDetrHungarianMatcher,
@@ -161,33 +161,25 @@ class BayesianRelationClassifier(nn.Module):
         self,
         features,  # gated_relation_source: (bsz, N, N, feat_dim)
         det_logits,  # class logits: (bsz, N, num_classes)
+        subj_classes=None,
+        obj_classes=None,
+        freq_bias=None
     ):
         B, N, _, D = features.shape
 
         assert features.dim() == 4, f"Expected 4D tensor, got {features.dim()}D"
         assert features.shape[1] == features.shape[2], "Expected square relation matrix"
 
-        if self.use_class_context:
-            with torch.no_grad():
-                class_prob = det_logits.softmax(-1)
-            emb = self.class_embed.weight
+        hc = features  # (bsz, N, N, 512)
 
-            soft_emb = torch.matmul(class_prob, emb)  # (bsz,N,64)
-            ## Embed class information
-            c1_emb = soft_emb.unsqueeze(2).expand(B, N, N, -1)  # subject
-            c2_emb = soft_emb.unsqueeze(1).expand(B, N, N, -1)  # object
-            ## Combine features and embeddings
-            combined = torch.cat(
-                [features, c1_emb, c2_emb], dim=-1
-            )  # (bsz, N, N, 512+2*class_embed_dim)
-        else:
-            combined = features
-
-        ## Process features (operates on last dimension)
-        hc = combined  # (bsz, N, N, 512)
-
-        # Compute outputs
         super_relation = self.fc5(hc)
+
+        if freq_bias is not None and subj_classes is not None and obj_classes is not None:
+           s_idx = subj_classes.unsqueeze(2).expand(B, N, N)
+           o_idx = obj_classes.unsqueeze(1).expand(B, N, N)
+           batch_bias = freq_bias[s_idx,o_idx]
+           super_relation =+ batch_bias
+
 
         return super_relation  # (bsz, N, N, 3)
 
@@ -254,6 +246,8 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 triplet_dist = F.log_softmax(triplet_dist, dim=-1)
             else:
                 triplet_dist = triplet_dist.log()
+            super_bias = get_super_frequency_bias(kwargs["fg_matrix"])
+            self.register_buffer("super_freq_bias", super_bias)
             self.rel_dist = nn.Parameter(rel_dist, requires_grad=False)
             self.triplet_dist = nn.Parameter(triplet_dist, requires_grad=False)
             del rel_dist, triplet_dist
@@ -486,7 +480,21 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
 
         if self.config.hierarchical:
             # Hierarchical prediction uses (log softmax)
-            pred_rel = self.rel_predictor(gated_relation_source, logits)
+            predicted_node = torch.argmax(logits, dim=-1)
+            if self.config.use_freq_bias:
+                pred_rel = self.rel_predictor(
+                    gated_relation_source,
+                    logits,
+                    subj_classes=predicted_node,
+                    obj_classes=predicted_node,
+                    freq_bias=self.super_freq_bias,
+                )
+            else:
+                pred_rel = self.rel_predictor(
+                    gated_relation_source,
+                    logits,
+                )
+
         else:
             # Original flat prediction
             pred_rel = self.rel_predictor(gated_relation_source)

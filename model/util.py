@@ -13,6 +13,7 @@ import os
 import wandb
 import torch
 from torch import Tensor, nn
+import numpy as np
 
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
@@ -380,6 +381,23 @@ def get_hierarchical_counts(fg_matrix):
 
     return family_counts
 
+def get_super_frequency_bias(fg_matrix, eps=1e-12, use_log=True):
+
+    map = get_super_rel_map() 
+
+    num_objs = fg_matrix.shape[0]
+    super_matrix = np.zeros((num_objs, num_objs, 3), dtype=np.float32)
+
+    for r_idx, family_id in enumerate(map):
+        super_matrix[:, :, family_id] += fg_matrix[:, :, r_idx]
+
+    denom = super_matrix.sum(axis=2, keepdims=True) + eps
+    probs = (super_matrix + eps) / denom
+
+    if use_log:
+        probs = np.log(probs)
+
+    return torch.from_numpy(probs)
 
 class GTTripletVis(pl.Callback):
     """

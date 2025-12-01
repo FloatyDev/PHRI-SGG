@@ -790,7 +790,6 @@ if __name__ == "__main__":
         save_dir="./logs",
         name=name,
     )
-    ipdb.set_trace()
     logger_list = [tensorboard_logger, wandb_logger]
     if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints"):
         if os.path.exists(f"{tensorboard_logger.log_dir}/checkpoints/last.ckpt"):
@@ -918,7 +917,7 @@ if __name__ == "__main__":
                 max_epochs=args.max_epochs,
                 val_check_interval=0.5,
                 gradient_clip_val=args.gradient_clip_val,
-                strategy=DDPStrategy(find_unused_parameters=False),
+                strategy=DDPStrategy(find_unused_parameters=True),
                 callbacks=[
                     checkpoint_callback,
                     early_stop_callback,
