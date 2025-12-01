@@ -293,10 +293,10 @@ class SGG(pl.LightningModule):
             # enable the layers that must learn
             allow = (
                 "rel_predictor.",  # hierarchical head
-                # "proj_q",  # query projection
-                # "proj_k",  # key projection
-                # "final_sub_proj",  # keeps sub-object embeddings in sync
-                # "final_obj_proj",  # keeps object embeddings in sync
+                "proj_q",  # query projection
+                "proj_k",  # key projection
+                "final_sub_proj",  # keeps sub-object embeddings in sync
+                "final_obj_proj",  # keeps object embeddings in sync
                 "rel_predictor_gate",
             )
 
