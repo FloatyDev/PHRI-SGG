@@ -147,14 +147,14 @@ class BayesianRelationClassifier(nn.Module):
             fused_dim = input_dim
 
         ## Prediction heads
-        # self.shared_fc = nn.Sequential(
-        #    nn.Linear(fused_dim, 512),  # 512 + class emb
-        #    nn.ReLU(),
-        #    nn.Dropout(p=0.5),
-        #    nn.Linear(512, 512),
-        #    nn.ReLU(),
-        #    nn.Dropout(0.5),
-        # )
+        self.shared_fc = nn.Sequential(
+            nn.Linear(fused_dim, 512),  # 512 + class emb
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+        )
         self.fc5 = nn.Linear(512, 3)  # Super relation (3 families)
 
     def forward(
@@ -163,23 +163,26 @@ class BayesianRelationClassifier(nn.Module):
         det_logits,  # class logits: (bsz, N, num_classes)
         subj_classes=None,
         obj_classes=None,
-        freq_bias=None
+        freq_bias=None,
     ):
         B, N, _, D = features.shape
 
         assert features.dim() == 4, f"Expected 4D tensor, got {features.dim()}D"
         assert features.shape[1] == features.shape[2], "Expected square relation matrix"
 
-        hc = features  # (bsz, N, N, 512)
+        hc = self.shared_fc(features)  # (bsz, N, N, 512)
 
         super_relation = self.fc5(hc)
 
-        if freq_bias is not None and subj_classes is not None and obj_classes is not None:
-           s_idx = subj_classes.unsqueeze(2).expand(B, N, N)
-           o_idx = obj_classes.unsqueeze(1).expand(B, N, N)
-           batch_bias = freq_bias[s_idx,o_idx]
-           super_relation =+ batch_bias
-
+        if (
+            freq_bias is not None
+            and subj_classes is not None
+            and obj_classes is not None
+        ):
+            s_idx = subj_classes.unsqueeze(2).expand(B, N, N)
+            o_idx = obj_classes.unsqueeze(1).expand(B, N, N)
+            batch_bias = freq_bias[s_idx, o_idx]
+            super_relation = +batch_bias
 
         return super_relation  # (bsz, N, N, 3)
 
@@ -246,7 +249,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 triplet_dist = F.log_softmax(triplet_dist, dim=-1)
             else:
                 triplet_dist = triplet_dist.log()
-            super_bias = get_super_frequency_bias(kwargs["fg_matrix"])
+            super_bias = get_super_frequency_bias(fg_matrix=fg_matrix)
             self.register_buffer("super_freq_bias", super_bias)
             self.rel_dist = nn.Parameter(rel_dist, requires_grad=False)
             self.triplet_dist = nn.Parameter(triplet_dist, requires_grad=False)
