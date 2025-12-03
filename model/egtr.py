@@ -35,7 +35,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.image_transforms import center_to_corners_format
 from transformers.utils import ModelOutput
-from model.util import get_super_rel_map, get_orig2idx, get_super_frequency_bias
+from model.util import get_super_rel_map, get_orig2idx, get_super_frequency_bias, get_super_root_frequency_bias
 
 from .deformable_detr import (
     DeformableDetrHungarianMatcher,
@@ -249,7 +249,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 triplet_dist = F.log_softmax(triplet_dist, dim=-1)
             else:
                 triplet_dist = triplet_dist.log()
-            super_bias = get_super_frequency_bias(fg_matrix=fg_matrix)
+            super_bias = get_super_root_frequency_bias(fg_matrix=fg_matrix)
             self.register_buffer("super_freq_bias", super_bias)
             self.rel_dist = nn.Parameter(rel_dist, requires_grad=False)
             self.triplet_dist = nn.Parameter(triplet_dist, requires_grad=False)
@@ -722,7 +722,7 @@ class SceneGraphGenerationLoss(nn.Module):
             family_counts = get_hierarchical_counts(fg_matrix)
             rooted_counts = torch.pow(family_counts, 0.5)
 
-            weights = 1 / rooted_counts + 1e-12
+            weights = 1 / (rooted_counts + 1e-12)
             weights = weights / weights.mean()
 
             self.register_buffer("class_weights", weights)

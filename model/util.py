@@ -399,6 +399,25 @@ def get_super_frequency_bias(fg_matrix, eps=1e-12, use_log=True):
 
     return torch.from_numpy(probs)
 
+def get_super_root_frequency_bias(fg_matrix, eps=1e-12):
+    mapping = get_super_rel_map()
+    num_objs = fg_matrix.shape[0]
+
+    super_matrix = np.zeros((num_objs, num_objs, 3), dtype=np.float32)
+    for r_idx, family_id in enumerate(mapping):
+        super_matrix[:, :, family_id] += fg_matrix[:, :, r_idx]
+
+    global_counts = super_matrix.sum(axis=(0, 1), keepdims=True)
+    root_global_counts = np.sqrt(global_counts)
+
+    balanced_scores = (super_matrix + eps) / (root_global_counts + eps)
+
+    # create probability distribution
+    denom = balanced_scores.sum(axis=2, keepdims=True) + eps
+    probs = balanced_scores / denom
+
+    return torch.from_numpy(np.log(probs))
+
 class GTTripletVis(pl.Callback):
     """
     Plot GT triplets straight from the batch that flows through training.
