@@ -720,9 +720,9 @@ class SceneGraphGenerationLoss(nn.Module):
                 persistent=True,
             )
             family_counts = get_hierarchical_counts(fg_matrix)
-            total_counts = family_counts.sum()
+            rooted_counts = torch.pow(family_counts, 0.5)
 
-            weights = total_counts / (3 * family_counts)
+            weights = 1 / rooted_counts + 1e-12
             weights = weights / weights.mean()
 
             self.register_buffer("class_weights", weights)
