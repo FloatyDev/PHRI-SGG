@@ -35,7 +35,12 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.image_transforms import center_to_corners_format
 from transformers.utils import ModelOutput
-from model.util import get_super_rel_map, get_orig2idx, get_super_frequency_bias, get_super_root_frequency_bias
+from model.util import (
+    get_super_rel_map,
+    get_orig2idx,
+    get_super_frequency_bias,
+    get_super_root_frequency_bias,
+)
 
 from .deformable_detr import (
     DeformableDetrHungarianMatcher,
@@ -156,6 +161,7 @@ class BayesianRelationClassifier(nn.Module):
             nn.Dropout(0.5),
         )
         self.fc5 = nn.Linear(512, 3)  # Super relation (3 families)
+        self.bias_scale = nn.Parameter(torch.tensor(0.1))
 
     def forward(
         self,
@@ -182,7 +188,7 @@ class BayesianRelationClassifier(nn.Module):
             s_idx = subj_classes.unsqueeze(2).expand(B, N, N)
             o_idx = obj_classes.unsqueeze(1).expand(B, N, N)
             batch_bias = freq_bias[s_idx, o_idx]
-            super_relation = super_relation + batch_bias
+            super_relation = super_relation + (self.bias_scale * batch_bias)
 
         return super_relation  # (bsz, N, N, 3)
 
