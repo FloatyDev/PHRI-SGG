@@ -42,7 +42,13 @@ from model.deformable_detr import (
 from model.egtr import DetrForSceneGraphGeneration
 from util.box_ops import rescale_bboxes
 from util.misc import use_deterministic_algorithms
-from model.util import GTTripletVis, count_trainable, get_super_rel_map, get_orig2idx, SuperRelationConfusionMatrix
+from model.util import (
+    GTTripletVis,
+    count_trainable,
+    get_super_rel_map,
+    get_orig2idx,
+    SuperRelationConfusionMatrix,
+)
 import wandb
 
 seed_everything(42, workers=True)
@@ -389,16 +395,14 @@ class SGG(pl.LightningModule):
         if not self.validation_step_outputs:
             return
 
-        log_dict = {
-            "step": torch.tensor(self.global_step, dtype=torch.float32),
-            "epoch": torch.tensor(self.current_epoch, dtype=torch.float32),
-        }
+        log_dict = {}
+
         # aggregate metrics across batches
         for k in self.validation_step_outputs[0].keys():
             log_dict[f"validation_" + k] = (
                 torch.stack([x[k] for x in self.validation_step_outputs]).mean().item()
             )
-        self.log_dict(log_dict, on_epoch=True)
+        self.log_dict(log_dict, sync_dist=True)
         self.validation_step_outputs.clear()
 
     @rank_zero_only
@@ -866,39 +870,40 @@ if __name__ == "__main__":
         rel_categories=rel_categories,
         freq=1,
     )
-    cm_callback= SuperRelationConfusionMatrix(id2label=id2label)
+    cm_callback = SuperRelationConfusionMatrix(id2label=id2label)
+
     class SaveConfigCallback(Callback):
-     def __init__(self, config_path, log_dir, wandb_logger=None):
-         super().__init__()
-         self.config_path = config_path
-         self.log_dir = log_dir
-         self.wandb_logger = wandb_logger  # Store the logger
+        def __init__(self, config_path, log_dir, wandb_logger=None):
+            super().__init__()
+            self.config_path = config_path
+            self.log_dir = log_dir
+            self.wandb_logger = wandb_logger  # Store the logger
 
-     def on_train_start(self, trainer, pl_module):
-         # Only save on rank 0
-         if trainer.global_rank == 0:
-             config_dest = Path(self.log_dir) / "config_train.yaml"
-             if self.config_path and Path(self.config_path).exists():
-                 shutil.copy2(self.config_path, config_dest)
-                 print(f"Saved config locally to: {config_dest}")
+        def on_train_start(self, trainer, pl_module):
+            # Only save on rank 0
+            if trainer.global_rank == 0:
+                config_dest = Path(self.log_dir) / "config_train.yaml"
+                if self.config_path and Path(self.config_path).exists():
+                    shutil.copy2(self.config_path, config_dest)
+                    print(f"Saved config locally to: {config_dest}")
 
-                 if self.wandb_logger:
-                     try:
-                         # self.wandb_logger.experiment is the wandb.Run object
-                         # .save() uploads the file to the run's file directory
-                         self.wandb_logger.experiment.save(self.config_path)
-                         print(f"Saved {self.config_path} to wandb cloud.")
-                     except Exception as e:
-                         print(f"Error saving config to wandb: {e}")
-                 else:
-                     print("WandbLogger not provided, config not saved to cloud.")
-             else:
-                 print(f"Config file not found at {self.config_path}, cannot save.")
+                    if self.wandb_logger:
+                        try:
+                            # self.wandb_logger.experiment is the wandb.Run object
+                            # .save() uploads the file to the run's file directory
+                            self.wandb_logger.experiment.save(self.config_path)
+                            print(f"Saved {self.config_path} to wandb cloud.")
+                        except Exception as e:
+                            print(f"Error saving config to wandb: {e}")
+                    else:
+                        print("WandbLogger not provided, config not saved to cloud.")
+                else:
+                    print(f"Config file not found at {self.config_path}, cannot save.")
 
     config_callback = SaveConfigCallback(
         config_path="./config_train.yaml",  # Update with your config path
         log_dir=tensorboard_logger.log_dir,
-        wandb_logger=wandb_logger
+        wandb_logger=wandb_logger,
     )
     # Train
     trainer = None
@@ -923,7 +928,7 @@ if __name__ == "__main__":
                     early_stop_callback,
                     lr_monitor_callback,
                     config_callback,
-                    cm_callback
+                    cm_callback,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
