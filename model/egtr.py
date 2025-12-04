@@ -712,24 +712,14 @@ class SceneGraphGenerationLoss(nn.Module):
         self.hierarchical = hierarchical
 
         if hierarchical:
-            orig2famidx, num_geo, num_poss, num_sem = get_orig2idx()
-
             self.register_buffer(
                 "orig2fam",
                 torch.tensor(self.super_relation_map, dtype=torch.long),
                 persistent=True,
             )
-            family_counts = get_hierarchical_counts(fg_matrix)
-            rooted_counts = torch.pow(family_counts, 0.5)
-
-            weights = 1 / (rooted_counts + 1e-12)
-            weights = weights / weights.mean()
-
-            self.register_buffer("class_weights", weights)
 
             self.super_loss = FocalLoss(
                 gamma=2,
-                alpha=self.class_weights,
                 reduction="none",
                 task_type="multi-class",
                 num_classes=3,
