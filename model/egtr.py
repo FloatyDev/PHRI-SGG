@@ -28,6 +28,7 @@ import math
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+import matplotlib.pyplot as plt
 
 import ipdb
 import torch
@@ -161,7 +162,6 @@ class BayesianRelationClassifier(nn.Module):
             nn.Dropout(0.5),
         )
         self.fc5 = nn.Linear(512, 3)  # Super relation (3 families)
-        self.bias_scale = nn.Parameter(torch.tensor(0.1))
 
     def forward(
         self,
@@ -188,7 +188,7 @@ class BayesianRelationClassifier(nn.Module):
             s_idx = subj_classes.unsqueeze(2).expand(B, N, N)
             o_idx = obj_classes.unsqueeze(1).expand(B, N, N)
             batch_bias = freq_bias[s_idx, o_idx]
-            super_relation = super_relation + (self.bias_scale * batch_bias)
+            super_relation = super_relation + batch_bias
 
         return super_relation  # (bsz, N, N, 3)
 
@@ -257,6 +257,8 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 triplet_dist = triplet_dist.log()
             super_bias = get_super_root_frequency_bias(fg_matrix=fg_matrix)
             self.register_buffer("super_freq_bias", super_bias)
+            analyze_bias_distribution(super_bias)
+            assert 0
             self.rel_dist = nn.Parameter(rel_dist, requires_grad=False)
             self.triplet_dist = nn.Parameter(triplet_dist, requires_grad=False)
             del rel_dist, triplet_dist
@@ -649,6 +651,81 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
         )
 
 
+def inspect_bias_statistics(freq_bias_tensor):
+    """
+    Analyzes the pre-computed frequency bias tensor.
+    Args:
+        freq_bias_tensor: torch.Tensor of shape (Num_Classes, Num_Classes, 3)
+    """
+    print("\n--- Bias Statistics Inspection ---")
+
+    # Check for -inf (which happens if log(0) occurred)
+    if torch.isinf(freq_bias_tensor).any():
+        print(
+            "WARNING: Bias contains -inf values! These will kill gradients immediately."
+        )
+        # Fix: Replace -inf with a large negative number that is safe for sigmoid
+        # -10.0 results in sigmoid(-10) ~= 4.5e-5, which is small but allows gradient flow.
+        min_safe_val = -10.0
+        print(f"Suggestion: Clamp bottom range to {min_safe_val}")
+
+    max_val = freq_bias_tensor.max().item()
+    min_val = freq_bias_tensor.min().item()
+    mean_val = freq_bias_tensor.mean().item()
+
+    print(f"Max Log-Prob: {max_val:.4f}")
+    print(f"Min Log-Prob: {min_val:.4f}")
+    print(f"Mean Log-Prob: {mean_val:.4f}")
+
+    # Check "Active Zone" Percentage (values between -4 and +4)
+    in_range = (
+        (freq_bias_tensor > -4.0) & (freq_bias_tensor < 4.0)
+    ).float().mean() * 100
+    print(
+        f"Percentage of bias values in 'Gradient Safe Zone' (-4 to 4): {in_range:.2f}%"
+    )
+    print("----------------------------------\n")
+
+
+def analyze_bias_distribution(bias_tensor, title="Bias Distribution"):
+    """
+    Plots a histogram of the bias values to check for saturation.
+    """
+    # Flatten tensor to 1D array
+    values = bias_tensor.cpu().numpy().flatten()
+
+    # Statistics
+    min_v, max_v = values.min(), values.max()
+    mean_v, std_v = values.mean(), values.std()
+
+    # Percentage in Safe Zone (-4 to +4)
+    safe_zone = ((values > -4) & (values < 4)).sum() / len(values) * 100
+
+    print(f"--- {title} ---")
+    print(f"Range: [{min_v:.2f}, {max_v:.2f}]")
+    print(f"Mean:  {mean_v:.2f} +/- {std_v:.2f}")
+    print(f"Gradient Safe Zone (-4 to +4): {safe_zone:.2f}%")
+
+    # Plotting
+    plt.figure(figsize=(10, 5))
+    plt.hist(values, bins=100, color="blue", alpha=0.7)
+
+    # Draw "Safe Zone" lines
+    plt.axvline(x=-4, color="r", linestyle="--", label="Gradient Decay Start")
+    plt.axvline(x=-6, color="k", linestyle="--", label="Gradient Death")
+
+    plt.title(f"{title}\nSafe Zone: {safe_zone:.1f}%")
+    plt.xlabel("Logit Bias Value")
+    plt.ylabel("Frequency")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # Save or Show
+    plt.savefig("bias_distribution_check.png")
+    print("Plot saved to bias_distribution_check.png")
+    plt.close()
+
+
 # taken from https://github.com/facebookresearch/detr/blob/master/models/detr.py
 class SceneGraphGenerationLoss(nn.Module):
     """
@@ -723,13 +800,12 @@ class SceneGraphGenerationLoss(nn.Module):
                 torch.tensor(self.super_relation_map, dtype=torch.long),
                 persistent=True,
             )
+            super_counts = get_hierarchical_counts(fg_matrix=fg_matrix)
+            total = super_counts.sum()
+            eps = 1e-12
 
-            self.super_loss = FocalLoss(
-                gamma=2,
-                reduction="none",
-                task_type="multi-class",
-                num_classes=3,
-            )
+            weights = total / (super_counts + eps)
+            self.super_loss = nn.BCEWithLogitsLoss(pos_weight=weights, reduction="none")
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -998,15 +1074,23 @@ class SceneGraphGenerationLoss(nn.Module):
         mask_rel = target_rel.sum(-1) > 0  # NxN
 
         if mask_rel.any():
-            # Note: in case of multiple rel in a gt pair we select only one
-            # To overcome this we need BCEWithLogitsLoss and some other tweaks
-            rel_idx = target_rel[mask_rel].argmax(-1)
-            super_tgt = self.orig2fam[rel_idx]  # 0/1/2
+            preds = pred_super[mask_rel]
 
+            fine_tgt = target_rel[mask_rel]
+
+            M = preds.shape[0]
+            super_tgt = torch.zeros((M, 3), device=preds.device, dtype=torch.float32)
+
+            idx = fine_tgt.nonzero()
+            pair_idx = idx[:, 0]
+            rel_idx = idx[:, 1]
+            fam_idx = self.orig2fam[rel_idx]
+
+            super_tgt.index_put_(
+                (pair_idx, fam_idx), torch.tensor(1.0, device=super_tgt.device)
+            )
             super_loss_vec = self.super_loss(pred_super[mask_rel], super_tgt)
-            super_loss = (
-                super_loss_vec.mean()
-            )  # weight with uncertainty of adaptive-smoothing post-loss
+            super_loss = super_loss_vec.mean()
         else:
             super_loss = (pred_super * 0).sum()
 
