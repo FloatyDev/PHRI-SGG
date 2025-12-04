@@ -380,6 +380,15 @@ class SGG(pl.LightningModule):
 
         return loss
 
+    def on_before_optimizer_step(self, optimizer):
+        # Compute the 2 norm for each layer
+        grad_norms = {}
+        for name, p in self.model.named_parameters():
+            if p.grad is not None and "rel_predictor" in name:
+                grad_norms[name] = p.grad.norm(2).item()
+
+        self.log_dict({f"grads/{k}": v for k, v in grad_norms.items()})
+
     def on_validation_epoch_start(self):
         self.validation_step_outputs = []  # Initialize collection list
 
