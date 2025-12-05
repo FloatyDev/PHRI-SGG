@@ -389,30 +389,39 @@ class SGG(pl.LightningModule):
 
         self.log_dict({f"grads/{k}": v for k, v in grad_norms.items()})
 
-    def on_validation_epoch_start(self):
-        self.validation_step_outputs = []  # Initialize collection list
+    # def on_validation_epoch_start(self):
+    #    self.validation_step_outputs = []  # Initialize collection list
 
     def validation_step(self, batch, batch_idx):
         loss, loss_dict, outputs = self.common_step(batch, batch_idx)
-        loss_dict["loss"] = loss
 
-        self.validation_step_outputs.append(loss_dict)
+        self.log(
+            "validation_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
+            prog_bar=True,
+        )
 
-        return {"loss": loss, "outputs": outputs, "targets": batch["labels"]}
+        for k, v in loss_dict.items():
+            self.log(f"validation_{k}", v, on_step=False, on_epoch=True, sync_dist=True)
 
-    def on_validation_epoch_end(self):
-        if not self.validation_step_outputs:
-            return
+        return {"outputs": outputs, "targets": batch["labels"]}
 
-        log_dict = {}
+    # def on_validation_epoch_end(self):
+    #    if not self.validation_step_outputs:
+    #        return
 
-        # aggregate metrics across batches
-        for k in self.validation_step_outputs[0].keys():
-            log_dict[f"validation_" + k] = (
-                torch.stack([x[k] for x in self.validation_step_outputs]).mean().item()
-            )
-        self.log_dict(log_dict, sync_dist=True)
-        self.validation_step_outputs.clear()
+    #    log_dict = {}
+
+    #    # aggregate metrics across batches
+    #    for k in self.validation_step_outputs[0].keys():
+    #        log_dict[f"validation_" + k] = (
+    #            torch.stack([x[k] for x in self.validation_step_outputs]).mean().item()
+    #        )
+    #    self.log_dict(log_dict, sync_dist=True)
+    #    self.validation_step_outputs.clear()
 
     @rank_zero_only
     def on_train_start(self) -> None:
@@ -949,6 +958,8 @@ if __name__ == "__main__":
             module.model.train()
             trainer.fit(module, ckpt_path=ckpt_path)
 
+            wandb.finish()
+
             try:
                 os.chmod(tensorboard_logger.log_dir, 0o0777)
             except PermissionError as e:
@@ -961,6 +972,13 @@ if __name__ == "__main__":
             )[-1]
 
             # Finetune trainer setting
+            wandb_logger = WandbLogger(
+                project="hier-egtr_family_classifier",
+                name=f"{name}__finetune",
+                group=name,
+                save_dir="./logs",
+                log_model=False,
+            )
             logger = TensorBoardLogger(
                 save_dir, name=f"{name}__finetune", version=version
             )
