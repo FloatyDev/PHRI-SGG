@@ -551,8 +551,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 )
             else:
                 pred_rel = self.rel_predictor(
-                    gated_relation_source,
-                    logits,
+                    gated_relation_source
                 )
 
         else:
@@ -854,7 +853,8 @@ class SceneGraphGenerationLoss(nn.Module):
             eps = 1e-12
 
             weights = total / (super_counts + eps)
-            self.super_loss = nn.BCEWithLogitsLoss(pos_weight=weights, reduction="none")
+
+            self.super_loss = nn.CrossEntropyLoss(reduction="none")
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -1033,7 +1033,7 @@ class SceneGraphGenerationLoss(nn.Module):
         target_super = self.orig2fam[gt_classes_fine]  # (K,)
 
         # self.super_loss must be nn.CrossEntropyLoss(weight=..., reduction='none')
-        loss_ce = self.super_loss(logits_super_active, target_super)
+        loss_ce = self.super_loss(logits_super_active, target_super).mean()
 
         # KL Divergence
         with torch.no_grad():

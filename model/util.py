@@ -301,57 +301,108 @@ def count_trainable(model, debugging=False):
 def get_super_rel_map():
     return [
         # 1-6: geometric
-        0,  # 1 above -> geometric
-        0,  # 2 accross -> geometric
-        0,  # 3 against -> geometric
-        0,  # 4 along -> geometric
-        0,  # 5 and -> geometric
-        0,  # 6 at -> geometric
-        2,  # 7 attached to -> semantic
-        0,  # 8 behind  -> geometric
-        1,  # 9: belonging to -> possessive
-        0,  # 10: between -> geometric
-        2,  # 11 carrying -> semantic
-        2,  # 12 covered in -> semantic
-        2,  # 13 covering -> semantic
-        2,  # 14 eating -> semantic
-        2,  # 15 flying in -> semantic
-        1,  # 16 for (misc) -> possessive (exclusion)
-        1,  # 17 from (misc) -> possessive (exclusion)
-        2,  # 18 growing on () -> semantic
-        2,  # 19 hanging from -> semantic
-        1,  # 20: has -> possessive
-        2,  # 21: holding -> semantic (light_semantic_posession treated as semantic)
-        0,  # 22 in -> geometric
-        0,  # 23 in front of -> geometric
-        2,  # 24 laying on -> semantic
-        2,  # 25 looking at -> semantic
-        2,  # 26 lying on -> semantic
-        1,  # 27 made of -> possessive
-        2,  # 28: mounted on -> semantic
-        0,  # 29: near -> geometric
-        1,  # 30: of -> possessive
-        0,  # 31 on -> geometric
-        0,  # 32 on back of -> geometric
-        0,  # 33 over -> geometric
-        # 34-35: semantic
-        2,  # 34 painted on -> semantic
-        2,  # 3 parked on -> semantic
-        1,  # 36: part of -> possessive
-        2,  # 37 playing -> semantic
-        2,  # 38 riding -> semantic
-        2,  # 39 says -> semantic
-        2,  # 40 sitting on -> semantic
-        2,  # 41 standing on -> semantic
-        1,  # 42: to -> possessive
-        0,  # 43: under -> geometric
-        2,  # 44: using -> semantic (light_semantic_posession treated as semantic)
-        2,  # 45 walking in -> semantic
-        2,  # 46 walking on -> semantic
-        2,  # 47 watching -> semantic
-        1,  # 48 wearing -> possessive
-        1,  # 49 wears -> possessive
-        1,  # 50: with -> possessive
+        #0,  # 1 above -> geometric
+        #0,  # 2 accross -> geometric
+        #0,  # 3 against -> geometric
+        #0,  # 4 along -> geometric
+        #0,  # 5 and -> geometric
+        #0,  # 6 at -> geometric
+        #2,  # 7 attached to -> semantic
+        #0,  # 8 behind  -> geometric
+        #1,  # 9: belonging to -> possessive
+        #0,  # 10: between -> geometric
+        #2,  # 11 carrying -> semantic
+        #2,  # 12 covered in -> semantic
+        #2,  # 13 covering -> semantic
+        #2,  # 14 eating -> semantic
+        #2,  # 15 flying in -> semantic
+        #1,  # 16 for (misc) -> possessive (exclusion)
+        #1,  # 17 from (misc) -> possessive (exclusion)
+        #2,  # 18 growing on () -> semantic
+        #2,  # 19 hanging from -> semantic
+        #1,  # 20: has -> possessive
+        #2,  # 21: holding -> semantic (light_semantic_posession treated as semantic)
+        #0,  # 22 in -> geometric
+        #0,  # 23 in front of -> geometric
+        #2,  # 24 laying on -> semantic
+        #2,  # 25 looking at -> semantic
+        #2,  # 26 lying on -> semantic
+        #1,  # 27 made of -> possessive
+        #2,  # 28: mounted on -> semantic
+        #0,  # 29: near -> geometric
+        #1,  # 30: of -> possessive
+        #0,  # 31 on -> geometric
+        #0,  # 32 on back of -> geometric
+        #0,  # 33 over -> geometric
+        ## 34-35: semantic
+        #2,  # 34 painted on -> semantic
+        #2,  # 3 parked on -> semantic
+        #1,  # 36: part of -> possessive
+        #2,  # 37 playing -> semantic
+        #2,  # 38 riding -> semantic
+        #2,  # 39 says -> semantic
+        #2,  # 40 sitting on -> semantic
+        #2,  # 41 standing on -> semantic
+        #1,  # 42: to -> possessive
+        #0,  # 43: under -> geometric
+        #2,  # 44: using -> semantic (light_semantic_posession treated as semantic)
+        #2,  # 45 walking in -> semantic
+        #2,  # 46 walking on -> semantic
+        #2,  # 47 watching -> semantic
+        #1,  # 48 wearing -> possessive
+        #1,  # 49 wears -> possessive
+        #1,  # 50: with -> possessive
+        # clip-text mapping
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        0,
+        0,
+        2,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        2,
+        0,
+        0,
+        2,
+        0,
+        2,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        2,
+        2,
+        2,
+        0,
+        2,
+        0,
+        0,
+        2,
+        0,
+        1,
+        2,
+        1,
+        0,
+        2,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
     ]
 
 
@@ -463,7 +514,39 @@ def get_super_root_frequency_bias(fg_matrix, eps=1e-12):
 
     return torch.from_numpy(np.log(probs))
 
+def get_class_weights(fg_matrix):
+    """
+    Calculates class weights to counteract the Geometric bias.
+    
+    Args:
+        fg_matrix: (Num_Obj, Num_Obj, 50) count matrix from dataset stats
+        beta: (Optional) Smoothing factor for "Effective Number of Samples" 
+              closer to 1.0 = more aggressive re-balancing.
+              
+    Returns:
+        torch.Tensor: Shape (3,) weights for CrossEntropyLoss
+    """
+    # Sum over subject/object dimensions -> [50]
+    if hasattr(fg_matrix, 'sum'): # Handles both tensor and numpy
+         fine_counts = torch.tensor(fg_matrix.sum(axis=(0, 1)), dtype=torch.float32)
+    
+    # Map to families [0, 1, 2]
+    mapping = torch.tensor(get_super_rel_map(), device=fine_counts.device)
+    family_counts = torch.zeros(3, device=fine_counts.device)
+    
+    for i in range(3):
+        mask = mapping == i
+        family_counts[i] = fine_counts[mask].sum()
 
+    # Formula: n_samples / (n_classes * count_class)
+    total_samples = family_counts.sum()
+    n_classes = 3
+    
+    weights = total_samples / (n_classes * family_counts)
+
+    # weights = torch.clamp(weights, max=10.0) 
+    
+    return weights
 class GTTripletVis(pl.Callback):
     """
     Plot GT triplets straight from the batch that flows through training.
