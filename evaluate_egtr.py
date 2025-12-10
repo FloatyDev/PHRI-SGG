@@ -52,26 +52,34 @@ def evaluate(
 
     family_names = ["geometric", "possessive", "semantic"]
     family_sgg_evaluator_list = []
+    
+    # Initialize per-category evaluators
     if family_sgg_evaluator is not None:
         for index, name in enumerate(family_names):
-            # 'index' will be 0, 1, 2, matching your family IDs
             family_sgg_evaluator_list.append(
                 (
                     index,
                     name,
                     BasicSceneGraphEvaluator.all_modes(multiple_preds=False),
-                )  # Or True, as you need
+                )
             )
 
+    print("Starting evaluation...")
     for batch in tqdm(dataloader):
+        # Move batch to device
+        batch_pixel = batch["pixel_values"].to(model.device)
+        batch_mask = batch["pixel_mask"].to(model.device)
+        
         outputs = model(
-            pixel_values=batch["pixel_values"].cuda(),
-            pixel_mask=batch["pixel_mask"].cuda(),
+            pixel_values=batch_pixel,
+            pixel_mask=batch_mask,
             output_attentions=False,
             output_attention_states=True,
             output_hidden_states=True,
         )
+        
         targets = batch["labels"]
+        
         evaluate_batch(
             outputs,
             targets,
@@ -79,19 +87,22 @@ def evaluate(
             family_sgg_evaluator_list,
             num_labels,
         )
+ 
         if coco_evaluator is not None:
             orig_target_sizes = torch.stack(
                 [target["orig_size"] for target in targets], dim=0
-            )
+            ).to(model.device)
+            
             results = feature_extractor.post_process(
-                outputs, orig_target_sizes.to(model.device)
-            )  # convert outputs of model to COCO api
+                outputs, orig_target_sizes
+            )
+            
             res = {
                 target["image_id"].item(): output
                 for target, output in zip(targets, results)
             }
             coco_evaluator.update(res)
-
+    
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()
         coco_evaluator.accumulate()
@@ -99,10 +110,13 @@ def evaluate(
         metric_dict.update({"AP50": coco_evaluator.coco_eval["bbox"].stats[1]})
 
     if family_sgg_evaluator is not None:
+ 
         recall = family_sgg_evaluator["sgdet"].print_stats()
+        
         mean_recall = calculate_mR_from_evaluator_list(
             family_sgg_evaluator_list, "sgdet", multiple_preds=False
         )
+        
         recall = {f"(single){key}": value for key, value in recall.items()}
         mean_recall = {f"(single){key}": value for key, value in mean_recall.items()}
         metric_dict.update(recall)
@@ -230,14 +244,15 @@ if __name__ == "__main__":
         )[-1]
 
     state_dict = torch.load(ckpt_to_load, map_location="cpu")["state_dict"]
-    for k in list(state_dict.keys()):
-        state_dict[k[6:]] = state_dict.pop(k)  # "model."
 
-    missing, unexpected = model.load_state_dict(state_dict)
-    print(
-        f"✓ loaded {ckpt_to_load}  "
-        f"({len(unexpected)} unexpected • {len(missing)} missing)"
-    )
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("model."):
+            new_state_dict[k[6:]] = v
+        else:
+            new_state_dict[k] = v
+
+    missing, unexpected = model.load_state_dict(new_state_dict,strict=False)
     model.cuda()
 
     # FPS
@@ -260,7 +275,9 @@ if __name__ == "__main__":
         filename = f'{ckpt_to_load.replace(".ckpt", "")}__{args.split}__{len(test_dataloader)}__{device}'
         if args.logit_adjustment:
             filename += f"__la_{args.logit_adj_tau}"
+
         metric["eval_arg"] = args.__dict__
+
         with open(f"{filename}.json", "w") as f:
             json.dump(metric, f)
         print("metric is saved in", f"{filename}.json")

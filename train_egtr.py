@@ -64,67 +64,69 @@ def evaluate_batch(
     family_sgg_evaluator_list,
     num_labels,
     max_topk=100,
-    hierarchical=True,
 ):
-    assert (
-        hierarchical
-    ), "This evaluate_batch version is for hierarchical/family-only evaluation"
-
+    """
+    Evaluates a single batch for Super-Relation (Hierarchical) performance.
+    """
     orig2fam = get_super_rel_map()
-    device = outputs["logits"].device
+    
+ 
+    pred_rel_raw = outputs["pred_rel"]
+    if isinstance(pred_rel_raw, tuple):
+        pred_super_logits = pred_rel_raw[1] 
+    else:
+        pred_super_logits = pred_rel_raw
 
     for j, target in enumerate(targets):
+        pred_obj_logits = outputs["logits"][j]      # (N, num_obj_classes)
+        pred_boxes = outputs["pred_boxes"][j]       # (N, 4)
+        pred_super_score_frame = pred_super_logits[j] # (N, N, 3)
 
-        pred_obj_logits = outputs["logits"][j]  # Object logits (N, num_obj_classes)
-        pred_boxes = outputs["pred_boxes"][j]  # Predicted boxes (N, 4)
-        pred_super_scores = outputs["pred_rel"][
-            j
-        ]  # Family relation scores (N, N, 3) - logits or logprobs
-        pred_super_probs = pred_super_scores.exp()
+        pred_super_probs = torch.nn.functional.softmax(pred_super_score_frame, dim=-1)
+
         orig_size = target["orig_size"].cpu()
 
         obj_scores, pred_classes = torch.max(
             pred_obj_logits.softmax(-1)[:, :num_labels], -1
         )
+        
         sub_ob_scores = torch.outer(obj_scores, obj_scores)
-        sub_ob_scores[
-            torch.arange(pred_obj_logits.size(0)), torch.arange(pred_obj_logits.size(0))
-        ] = 0.0  # prevent self-connection
+        sub_ob_scores.fill_diagonal_(0.0)
 
         if "pred_connectivity" in outputs:
             pred_connectivity = torch.clamp(outputs["pred_connectivity"][j], 0.0, 1.0)
             pred_super_probs = torch.mul(pred_super_probs, pred_connectivity)
 
+
         triplet_scores = torch.mul(pred_super_probs.max(-1)[0], sub_ob_scores)
-        pred_rel_inds = argsort_desc(triplet_scores.cpu().clone().numpy())[
-            :max_topk, :
-        ]  # [pred_rels, 2(s,o)]
+        
+        pred_rel_inds = argsort_desc(triplet_scores.cpu().clone().numpy())[:max_topk, :]
+
         rel_scores = (
             pred_super_probs.cpu()
             .clone()
             .numpy()[pred_rel_inds[:, 0], pred_rel_inds[:, 1]]
-        )  # [pred_rels, 50]
+        )
 
         pred_entry = {
             "pred_boxes": rescale_bboxes(
                 pred_boxes.cpu(), torch.flip(orig_size, dims=[0])
-            )
-            .clone()
-            .numpy(),
+            ).clone().numpy(),
             "pred_classes": pred_classes.cpu().clone().numpy(),
             "obj_scores": obj_scores.cpu().clone().numpy(),
             "pred_rel_inds": pred_rel_inds,
-            "rel_scores": rel_scores,
+            "rel_scores": rel_scores, 
         }
-        # GT
-        target_labels = target["class_labels"].cpu()  # [num_objs]
-        target_boxes = target["boxes"].cpu()  # [num_objs, 4]
 
-        target_rel = target["rel"].cpu().nonzero()  # [num_rels, 3(s, o, p)]
+        target_labels = target["class_labels"].cpu()
+        target_boxes = target["boxes"].cpu()
+        target_rel = target["rel"].cpu().nonzero() # [num_rels, 3] -> (s, o, predicate)
 
         if target_rel.numel() > 0:
-            gt_rels_idx = target_rel[:, 2]
-            gt_fam_idx = torch.tensor(orig2fam)[gt_rels_idx]
+            gt_rels_idx = target_rel[:, 2] # 0-49
+            
+            gt_fam_idx = torch.tensor(orig2fam)[gt_rels_idx] 
+            
             gt_family_triplets = torch.stack(
                 (target_rel[:, 0], target_rel[:, 1], gt_fam_idx), dim=-1
             )
@@ -141,15 +143,18 @@ def evaluate_batch(
             "gt_classes": target_labels.clone().numpy(),
         }
 
-        family_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(gt_entry, pred_entry)
+        if family_sgg_evaluator is not None:
+            family_sgg_evaluator["sgdet"].evaluate_scene_graph_entry(gt_entry, pred_entry)
 
-        for pred_id, _, evaluator_rel in family_sgg_evaluator_list:
-            gt_entry_rel = gt_entry.copy()
-            mask = np.in1d(gt_entry_rel["gt_relations"][:, -1], pred_id)
-            gt_entry_rel["gt_relations"] = gt_entry_rel["gt_relations"][mask, :]
-            if gt_entry_rel["gt_relations"].shape[0] == 0:
-                continue
-            evaluator_rel["sgdet"].evaluate_scene_graph_entry(gt_entry_rel, pred_entry)
+        if family_sgg_evaluator_list is not None:
+            for pred_id, _, evaluator_rel in family_sgg_evaluator_list:
+                gt_entry_rel = gt_entry.copy()
+                # Filter GT for specific family ID (0, 1, or 2)
+                mask = np.in1d(gt_entry_rel["gt_relations"][:, -1], pred_id)
+                gt_entry_rel["gt_relations"] = gt_entry_rel["gt_relations"][mask, :]
+                if gt_entry_rel["gt_relations"].shape[0] == 0:
+                    continue
+                evaluator_rel["sgdet"].evaluate_scene_graph_entry(gt_entry_rel, pred_entry)
 
 
 def collate_fn(batch, feature_extractor):
@@ -258,7 +263,6 @@ class SGG(pl.LightningModule):
             )
             self.initialized_keys = []
         else:
-            # Load trained object detector
             self.model, load_info = DetrForSceneGraphGeneration.from_pretrained(
                 pretrained,
                 config=config,
@@ -269,80 +273,10 @@ class SGG(pl.LightningModule):
             self.initialized_keys = load_info["missing_keys"] + [
                 _key for _key, _, _ in load_info["mismatched_keys"]
             ]
-        # only train relation_head
-        # if train_relation_head:
-        #    if not main_trained:
-        #        # load trained egtr weights for main training
-        #        assert artifact_path, "have to give artifact_path"
-        #        print(f"Loading checkpoint config from: {artifact_path}")
 
-        #        try:
-        #            ckpt_config = DeformableDetrConfig.from_pretrained(artifact_path)
-        #            ckpt_is_hierarchical = ckpt_config.hierarchical
-        #            print(
-        #                f"Checkpoint config loaded. Checkpoint is hierarchical: {ckpt_is_hierarchical}"
-        #            )
-        #        except Exception as e:
-        #            print(
-        #                f"Warning: Could not load config from {artifact_path}. Assuming flat model. Error: {e}"
-        #            )
-        #            ckpt_is_hierarchical = False
-
-        #        ckpt_path = sorted(
-        #            glob(f"{args.artifact_path}/checkpoints/epoch=*.ckpt"),
-        #            key=lambda x: int(x.split("epoch=")[1].split("-")[0]),
-        #        )[-1]
-        #        state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
-
-        #        for k in list(state_dict.keys()):
-        #            if (
-        #                k.startswith("model.rel_predictor.")
-        #                and not ckpt_is_hierarchical
-        #            ):
-        #                print(f"----deleting {k}")
-        #                del state_dict[k]
-        #            else:
-        #                state_dict[k[6:]] = state_dict.pop(k)  # "model."
-
-        #        missing, unexpected = self.model.load_state_dict(
-        #            state_dict, strict=False
-        #        )
-        #        print("[sgg] missing keys:", missing)
-        #        print("[sgg] unexpected keys:", unexpected)
-
-        #    # disable all parameters and enable training only the relation head
-        #    for p in self.model.parameters():
-        #        p.requires_grad = False
-
-        #    # enable the layers that must learn
-        #    allow = (
-        #        "rel_predictor.",  # hierarchical head
-        #        "proj_q",  # query projection
-        #        "proj_k",  # key projection
-        #        "final_sub_proj",  # keeps sub-object embeddings in sync
-        #        "final_obj_proj",  # keeps object embeddings in sync
-        #        "rel_predictor_gate",
-        #    )
-
-        #    for n, p in self.model.named_parameters():
-        #        if n.startswith(allow):
-        #            p.requires_grad = True
-
-        #    trainable = [n for n, p in self.model.named_parameters() if p.requires_grad]
-        #    unexpected = [n for n in trainable if not n.startswith(allow)]
-
-        #    count_trainable(model=self.model, debugging=True)
-
-        #    assert not unexpected, (
-        #        f"[sgg] unexpected trainable parameters:\n  {unexpected[:10]}… "
-        #        f"(total {len(unexpected)})"
-        #    )
-
-        #    print(f"[sgg] trainable parameter count: {len(trainable)}")
         # only train relation_head
         if train_relation_head:
             if not main_trained:
-                # load trained egtr weights for main training
                 assert artifact_path, "have to give artifact_path"
                 print(f"Loading checkpoint config from: {artifact_path}")
 
@@ -362,10 +296,9 @@ class SGG(pl.LightningModule):
                 state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
                 new_state_dict = {}
 
-                # Determine the Teacher's depth (Flat-50 usually has 3 layers: 0, 1, 2)
-                # The last layer is the Head, everything before is Shared.
+  
                 teacher_num_layers = 3 
-                teacher_last_layer_idx = teacher_num_layers - 1 # e.g., 2
+                teacher_last_layer_idx = teacher_num_layers - 1
 
                 print("DEBUG: Starting Weight Mapping...")
                 for k, v in state_dict.items():
@@ -377,11 +310,11 @@ class SGG(pl.LightningModule):
                             if layer_idx == teacher_last_layer_idx:
                                 new_k = k.replace(f"layers.{layer_idx}", "fine_head")
                                 new_state_dict[new_k] = v
-                                print(f"Mapped {k} -> {new_k}") # Uncomment to debug
+
                             elif layer_idx < teacher_last_layer_idx:
                                 new_k = k.replace(f"layers.{layer_idx}", f"shared_layers.{layer_idx}")
                                 new_state_dict[new_k] = v
-                                print(f"Mapped {k} -> {new_k}") # Uncomment to debug
+
                             else:
                                 print(f"Warning: Found layer index {layer_idx} higher than max expected {teacher_last_layer_idx}. Ignoring.")
 
@@ -389,9 +322,9 @@ class SGG(pl.LightningModule):
                             new_state_dict[k] = v
                     else:
                         new_state_dict[k] = v
-                # Swap state dict
+
                 state_dict = new_state_dict
-                # Remove "model." prefix if present
+
                 for k in list(state_dict.keys()):
                      if k.startswith("model."):
                         state_dict[k[6:]] = state_dict.pop(k)
@@ -401,15 +334,15 @@ class SGG(pl.LightningModule):
                 )
                 print("[sgg] missing keys (Should include super_head):", missing)
                 print("[sgg] unexpected keys:", unexpected)
-                # Verify that shared_layers.1 is NOT missing anymore
+
                 if any("shared_layers.1" in m for m in missing):
                     print("CRITICAL ERROR: shared_layers.1 is still missing! Check checkpoint indices.")
 
-            # --- STRICT FREEZING ---
+      
             for p in self.model.parameters():
                 p.requires_grad = False
 
-            # Enable ONLY the Super-Relation Head
+            
             allow = ("rel_predictor.super_head",)
 
             for n, p in self.model.named_parameters():
@@ -470,12 +403,52 @@ class SGG(pl.LightningModule):
         loss_dict = outputs.loss_dict
 
         return loss, loss_dict, outputs
-
+    
     def training_step(self, batch, batch_idx):
+        # 1. Run the shared forward pass
         loss, loss_dict, outputs = self.common_step(batch, batch_idx)
-        # logs metrics for each training_step,
-        # and the average across the epoch
-        # Log metrics directly with epoch aggregation
+
+        if batch_idx % 50 == 0 and loss.requires_grad:
+            
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+
+            if trainable_params:
+                if "loss_rel_ce" in loss_dict and loss_dict["loss_rel_ce"].requires_grad:
+                    grads_ce = torch.autograd.grad(
+                        loss_dict["loss_rel_ce"], 
+                        trainable_params, 
+                        retain_graph=True, 
+                        allow_unused=True
+                    )
+                    norm_ce = torch.norm(
+                        torch.stack([torch.norm(g.detach(), 2) for g in grads_ce if g is not None])
+                    )
+                    self.log("grads/debug_norm_rel_ce", norm_ce, prog_bar=False, sync_dist=True)
+
+                if "loss_rel_distill" in loss_dict and loss_dict["loss_rel_distill"].requires_grad:
+                    grads_distill = torch.autograd.grad(
+                        loss_dict["loss_rel_distill"], 
+                        trainable_params, 
+                        retain_graph=True, 
+                        allow_unused=True
+                    )
+                    norm_distill = torch.norm(
+                        torch.stack([torch.norm(g.detach(), 2) for g in grads_distill if g is not None])
+                    )
+                    self.log("grads/debug_norm_rel_distill", norm_distill, prog_bar=False, sync_dist=True)
+
+                    grads_total = torch.autograd.grad(
+                        loss, 
+                        trainable_params, 
+                        retain_graph=True, # Must retain for the actual optimizer.step()!
+                        allow_unused=True
+                    )
+                    norm_total = torch.norm(
+                        torch.stack([torch.norm(g.detach(), 2) for g in grads_total if g is not None])
+                    )
+                    self.log("grads/debug_norm_total", norm_total, prog_bar=True, sync_dist=True)
+
+        # Log standard metrics
         self.log("training_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
         for k, v in loss_dict.items():
             self.log(f"training_{k}", v, on_step=True, on_epoch=True, sync_dist=True)
@@ -490,9 +463,6 @@ class SGG(pl.LightningModule):
                 grad_norms[name] = p.grad.norm(2).item()
 
         self.log_dict({f"grads/{k}": v for k, v in grad_norms.items()})
-
-    # def on_validation_epoch_start(self):
-    #    self.validation_step_outputs = []  # Initialize collection list
 
     def validation_step(self, batch, batch_idx):
         loss, loss_dict, outputs = self.common_step(batch, batch_idx)
@@ -511,20 +481,6 @@ class SGG(pl.LightningModule):
 
         return {"outputs": outputs, "targets": batch["labels"]}
 
-    # def on_validation_epoch_end(self):
-    #    if not self.validation_step_outputs:
-    #        return
-
-    #    log_dict = {}
-
-    #    # aggregate metrics across batches
-    #    for k in self.validation_step_outputs[0].keys():
-    #        log_dict[f"validation_" + k] = (
-    #            torch.stack([x[k] for x in self.validation_step_outputs]).mean().item()
-    #        )
-    #    self.log_dict(log_dict, sync_dist=True)
-    #    self.validation_step_outputs.clear()
-
     @rank_zero_only
     def on_train_start(self) -> None:
         if hasattr(self, "logger") and self.logger is not None:
@@ -536,7 +492,7 @@ class SGG(pl.LightningModule):
         return super().on_train_start()
 
     def test_step(self, batch, batch_idx):
-        # get the inputs
+
         self.model.eval()
 
         pixel_values = batch["pixel_values"].to(self.device)
@@ -566,7 +522,7 @@ class SGG(pl.LightningModule):
                 )
                 results = self.feature_extractor.post_process(
                     outputs, orig_target_sizes.to(self.device)
-                )  # convert outputs of model to COCO api
+                )
                 res = {
                     target["image_id"].item(): output
                     for target, output in zip(targets, results)
@@ -575,7 +531,7 @@ class SGG(pl.LightningModule):
 
     def on_test_epoch_end(self):
         log_dict = {}
-        # log OD
+
         if self.coco_evaluator is not None:
             self.coco_evaluator.synchronize_between_processes()
             self.coco_evaluator.accumulate()

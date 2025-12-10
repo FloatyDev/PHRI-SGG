@@ -41,6 +41,7 @@ from model.util import (
     get_orig2idx,
     get_super_frequency_bias,
     get_super_root_frequency_bias,
+    get_class_weights
 )
 
 from .deformable_detr import (
@@ -848,13 +849,8 @@ class SceneGraphGenerationLoss(nn.Module):
                 torch.tensor(self.super_relation_map, dtype=torch.long),
                 persistent=True,
             )
-            super_counts = get_hierarchical_counts(fg_matrix=fg_matrix)
-            total = super_counts.sum()
-            eps = 1e-12
-
-            weights = total / (super_counts + eps)
-
-            self.super_loss = nn.CrossEntropyLoss(reduction="none")
+            class_weights = get_class_weights(fg_matrix)
+            self.super_loss = nn.CrossEntropyLoss(weight=class_weights, reduction="none")
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -1065,15 +1061,16 @@ class SceneGraphGenerationLoss(nn.Module):
 
         return {
             "loss_rel": total_loss,
-            "loss_ce": loss_ce,
-            "loss_distill": loss_distill,
+            "loss_rel_ce": loss_ce,
+            "loss_rel_distill": loss_distill,
         }
 
     def loss_relations(self, outputs, targets, indices, matching_costs, num_boxes):
         losses = []
         connect_losses = []
         super_losses = []
-
+        rel_ce_losses = []
+        rel_distill_losses = []
         for i, ((src_index, target_index), target, matching_cost) in enumerate(
             zip(indices, targets, matching_costs)
         ):
@@ -1126,6 +1123,8 @@ class SceneGraphGenerationLoss(nn.Module):
                     target_rel,
                 )
 
+                rel_ce_losses.append(loss_distill_dict["loss_rel_ce"])
+                rel_distill_losses.append(loss_distill_dict["loss_rel_distill"])
                 # The dictionary contains the summed loss
                 losses.append(loss_distill_dict["loss_rel"])
 
@@ -1143,6 +1142,8 @@ class SceneGraphGenerationLoss(nn.Module):
         main_loss_dict = {
             "loss_rel": torch.stack(losses).mean() if losses else torch.tensor(0.0, device=outputs["logits"].device),
             "loss_connectivity": torch.stack(connect_losses).mean() if connect_losses else torch.tensor(0.0, device=outputs["logits"].device),
+            "loss_rel_ce": torch.stack(rel_ce_losses).mean() if connect_losses else torch.tensor(0.0, device=outputs["logits"].device),
+            "loss_rel_distill": torch.stack(rel_distill_losses).mean() if connect_losses else torch.tensor(0.0, device=outputs["logits"].device),
         }
         return main_loss_dict
 
