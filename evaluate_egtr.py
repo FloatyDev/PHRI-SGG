@@ -42,7 +42,7 @@ def evaluate(
     model,
     dataloader,
     num_labels,
-    family_sgg_evaluator=None,
+    single_sgg_evaluator=None,
     oi_evaluator=None,
     coco_evaluator=None,
     feature_extractor=None,
@@ -50,13 +50,13 @@ def evaluate(
     metric_dict = {}
     model.eval()
 
-    family_names = ["geometric", "possessive", "semantic"]
-    family_sgg_evaluator_list = []
-    
+    rel_categories = dataloader.dataset.rel_categories
+    single_sgg_evaluator_list = []
+
     # Initialize per-category evaluators
-    if family_sgg_evaluator is not None:
-        for index, name in enumerate(family_names):
-            family_sgg_evaluator_list.append(
+    if single_sgg_evaluator is not None:
+        for index, name in enumerate(rel_categories):
+            single_sgg_evaluator_list.append(
                 (
                     index,
                     name,
@@ -69,7 +69,7 @@ def evaluate(
         # Move batch to device
         batch_pixel = batch["pixel_values"].to(model.device)
         batch_mask = batch["pixel_mask"].to(model.device)
-        
+
         outputs = model(
             pixel_values=batch_pixel,
             pixel_mask=batch_mask,
@@ -77,46 +77,44 @@ def evaluate(
             output_attention_states=True,
             output_hidden_states=True,
         )
-        
+
         targets = batch["labels"]
-        
+
         evaluate_batch(
             outputs,
             targets,
-            family_sgg_evaluator,
-            family_sgg_evaluator_list,
+            single_sgg_evaluator,
+            single_sgg_evaluator_list,
             num_labels,
         )
- 
+
         if coco_evaluator is not None:
             orig_target_sizes = torch.stack(
                 [target["orig_size"] for target in targets], dim=0
             ).to(model.device)
-            
-            results = feature_extractor.post_process(
-                outputs, orig_target_sizes
-            )
-            
+
+            results = feature_extractor.post_process(outputs, orig_target_sizes)
+
             res = {
                 target["image_id"].item(): output
                 for target, output in zip(targets, results)
             }
             coco_evaluator.update(res)
-    
+
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
         metric_dict.update({"AP50": coco_evaluator.coco_eval["bbox"].stats[1]})
 
-    if family_sgg_evaluator is not None:
- 
-        recall = family_sgg_evaluator["sgdet"].print_stats()
-        
+    if single_sgg_evaluator_list is not None:
+
+        recall = single_sgg_evaluator_list["sgdet"].print_stats()
+
         mean_recall = calculate_mR_from_evaluator_list(
-            family_sgg_evaluator_list, "sgdet", multiple_preds=False
+            single_sgg_evaluator_list, "sgdet", multiple_preds=False
         )
-        
+
         recall = {f"(single){key}": value for key, value in recall.items()}
         mean_recall = {f"(single){key}": value for key, value in mean_recall.items()}
         metric_dict.update(recall)
@@ -220,7 +218,7 @@ if __name__ == "__main__":
 
     # Evaluator
     if args.eval_single_preds:  # Use this flag for graph constraint evaluation
-        family_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=False)
+        singe_sgg_evaluator = BasicSceneGraphEvaluator.all_modes(multiple_preds=False)
 
     # Model
     config = DeformableDetrConfig.from_pretrained(args.artifact_path)
@@ -252,7 +250,7 @@ if __name__ == "__main__":
         else:
             new_state_dict[k] = v
 
-    missing, unexpected = model.load_state_dict(new_state_dict,strict=False)
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
     model.cuda()
 
     # FPS
@@ -264,7 +262,7 @@ if __name__ == "__main__":
             model,
             test_dataloader,
             max(id2label.keys()) + 1,
-            family_sgg_evaluator,
+            singe_sgg_evaluator,
             oi_evaluator,
             coco_evaluator,
             feature_extractor,
