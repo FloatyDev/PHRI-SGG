@@ -48,6 +48,7 @@ from model.util import (
     get_super_rel_map,
     get_orig2idx,
     SuperRelationConfusionMatrix,
+    ExpertDiagnosticsCallback
 )
 import wandb
 
@@ -992,6 +993,7 @@ if __name__ == "__main__":
         freq=1,
     )
     cm_callback = SuperRelationConfusionMatrix(id2label=id2label)
+    expert_callback = ExpertDiagnosticsCallback()
 
     class SaveConfigCallback(Callback):
         def __init__(self, config_path, log_dir, wandb_logger=None):
@@ -1050,6 +1052,7 @@ if __name__ == "__main__":
                     lr_monitor_callback,
                     config_callback,
                     cm_callback,
+                    expert_callback
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -1164,6 +1167,8 @@ if __name__ == "__main__":
                     checkpoint_callback,
                     early_stop_callback,
                     lr_monitor_callback,
+                    cm_callback,
+                    expert_callback
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
