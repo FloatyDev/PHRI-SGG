@@ -840,7 +840,7 @@ if __name__ == "__main__":
 
     # initialize wandblogger
     wandb_logger = WandbLogger(
-        project="hier-egtr_family_classifier",
+        project="hier-egtr_distill_training",
         log_model=False,
         save_dir="./logs",
         name=name,
