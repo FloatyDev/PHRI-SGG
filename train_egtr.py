@@ -1119,6 +1119,7 @@ if __name__ == "__main__":
                     checkpoint_callback,
                     early_stop_callback,
                     lr_monitor_callback,
+                    cm_callback,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
