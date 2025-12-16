@@ -1050,7 +1050,7 @@ if __name__ == "__main__":
                     lr_monitor_callback,
                     config_callback,
                     cm_callback,
-                    expert_callback
+                    expert_callback,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -1166,7 +1166,7 @@ if __name__ == "__main__":
                     early_stop_callback,
                     lr_monitor_callback,
                     cm_callback,
-                    expert_callback
+                    expert_callback,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )

@@ -53,6 +53,7 @@ from .deformable_detr import (
 )
 from .util import (
     FocalLoss,
+    SupConLossHierar,
     dice_loss,
     generalized_box_iou,
     nested_tensor_from_tensor_list,
@@ -429,7 +430,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
             self.rel_predictor = ExpertRelationClassifier(
                 input_dim=2 * config.d_model,
                 hidden_dim=config.d_model,
-                num_hidden_layers=3
+                num_hidden_layers=3,
             )
         else:
             self.rel_predictor = DeformableDetrMLPPredictionHead(
@@ -718,6 +719,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
             weight_dict["loss_giou"] = self.config.giou_loss_coefficient
             weight_dict["loss_rel"] = self.config.rel_loss_coefficient
             weight_dict["loss_connectivity"] = self.config.connectivity_loss_coefficient
+            weight_dict["loss_contrastive"] = 1.0
             aux_weight_dict = {}
             if self.config.auxiliary_loss:
                 for i in range(self.config.decoder_layers - 1):
@@ -940,6 +942,7 @@ class SceneGraphGenerationLoss(nn.Module):
                 weight=class_weights, reduction="none"
             )
             self.loss_experts = nn.CrossEntropyLoss()
+            self.constrastive_criterion = SupConLossHierar(temperature=0.1)
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -1212,15 +1215,73 @@ class SceneGraphGenerationLoss(nn.Module):
 
         return stats
 
+    def loss_contrastive(self, outputs, targets, indices, matching_costs, num_boxes):
+        """
+        Computes Supervised Contrastive Loss on the shared embeddings.
+        """
+        if "pred_rel" not in outputs or not isinstance(outputs["pred_rel"], dict):
+            return {
+                "loss_contrastive": torch.tensor(0.0, device=outputs["logits"].device)
+            }
+
+        embeddings = outputs["pred_rel"]["embeddings"]  # (B, N_Queries, N_Queries, Dim)
+
+        batch_feats = []
+        batch_labels = []
+
+        for i, (src_idx, tgt_idx) in enumerate(indices):
+
+            target_rel = targets[i]["rel"]  # (N_tgt_objects, N_tgt_objects, 50)
+
+            matched_tgt_rel = target_rel[tgt_idx][
+                :, tgt_idx
+            ]  # (K_matched, K_matched, 50)
+
+            active_pairs_mask = (
+                matched_tgt_rel.sum(dim=-1) > 0
+            )  # (K_matched, K_matched)
+
+            if not active_pairs_mask.any():
+                continue
+
+            matched_embeds = embeddings[i, src_idx][:, src_idx]
+
+            active_embeds = matched_embeds[active_pairs_mask]  # (Num_Active, Dim)
+
+            active_labels = matched_tgt_rel[active_pairs_mask].argmax(
+                dim=-1
+            )  # (Num_Active,)
+
+            batch_feats.append(active_embeds)
+            batch_labels.append(active_labels)
+
+        if len(batch_feats) == 0:
+            return {"loss_contrastive": torch.tensor(0.0, device=embeddings.device)}
+
+        flat_feats = torch.cat(batch_feats, dim=0)
+        flat_labels = torch.cat(batch_labels, dim=0)
+
+        if flat_feats.shape[0] < 2:
+            return {"loss_contrastive": torch.tensor(0.0, device=embeddings.device)}
+
+        loss = self.contrastive_criterion(flat_feats, flat_labels)
+
+        return {"loss_contrastive": loss * self.contrastive_weight}
+
     def loss_relations(self, outputs, targets, indices, matching_costs, num_boxes):
         losses = []
         connect_losses = []
+
+        batch_contrastive_feats = []
+        batch_contrastive_labels = []
+
         expert_logs = {
             "loss_super": [],
             "loss_geo": [],
             "loss_poss": [],
-            "loss_sem": []
+            "loss_sem": [],
         }
+
         for i, ((src_index, target_index), target, matching_cost) in enumerate(
             zip(indices, targets, matching_costs)
         ):
@@ -1232,6 +1293,7 @@ class SceneGraphGenerationLoss(nn.Module):
             full_target_index = torch.cat(
                 [target_index, torch.arange(len(target_index), self.num_object_queries)]
             )
+
             full_matching_cost = torch.cat(
                 [
                     matching_cost,
@@ -1243,9 +1305,7 @@ class SceneGraphGenerationLoss(nn.Module):
                 ]
             )
 
-            target_rel = target["rel"][full_target_index][
-                :, full_target_index
-            ]  # [num_obj_queries, num_obj_queries, config.num_rel_labels]
+            target_rel = target["rel"][full_target_index][:, full_target_index]
 
             rel_index = torch.nonzero(target_rel)
             target_connect = torch.zeros(
@@ -1256,24 +1316,42 @@ class SceneGraphGenerationLoss(nn.Module):
             pred_connectivity = outputs["pred_connectivity"][i, full_src_index][
                 :, full_src_index
             ]
-
-            # Connectivity loss
-            loss = self.connectivity_loss(pred_connectivity, target_connect)
-            connect_losses.append(loss)
+            connect_losses.append(
+                self.connectivity_loss(pred_connectivity, target_connect)
+            )
 
             if self.hierarchical and isinstance(outputs["pred_rel"], dict):
                 pred_rel_dict = {
-                        k: v[i, full_src_index][:, full_src_index] 
-                        for k, v in outputs["pred_rel"].items()
-                    }
-                
+                    k: v[i, full_src_index][:, full_src_index]
+                    for k, v in outputs["pred_rel"].items()
+                    if k != "embeddings"  # Don't slice embeddings with full index
+                }
+
                 expert_stats = self._loss_experts(pred_rel_dict, target_rel)
-                
+
                 losses.append(expert_stats["loss_rel"])
                 for k in expert_logs:
                     if k in expert_stats:
                         expert_logs[k].append(expert_stats[k])
+
+                if "embeddings" in outputs["pred_rel"]:
+                    raw_embeds = outputs["pred_rel"]["embeddings"][i]  # (N_q, N_q, D)
+
+                    orig_target_rel = target["rel"]  # The original, un-permuted target
+                    matched_gt_rel = orig_target_rel[target_index][:, target_index]
+
+                    active_pairs = matched_gt_rel.sum(dim=-1) > 0
+
+                    if active_pairs.any():
+                        matched_embeds = raw_embeds[src_index][:, src_index]
+
+                        batch_contrastive_feats.append(matched_embeds[active_pairs])
+                        batch_contrastive_labels.append(
+                            matched_gt_rel[active_pairs].argmax(dim=-1)
+                        )
+
             else:
+                # (Keep your original flat-mode logic here)
                 pred_rel = outputs["pred_rel"][i, full_src_index][:, full_src_index]
                 if self.model_training:
                     loss = self._loss_relations(
@@ -1303,12 +1381,126 @@ class SceneGraphGenerationLoss(nn.Module):
         }
 
         for k, v_list in expert_logs.items():
-                if v_list:
-                    main_loss_dict[k] = torch.stack(v_list).mean()
-                else:
-                    main_loss_dict[k] = torch.tensor(0.0)
+            main_loss_dict[k] = (
+                torch.stack(v_list).mean() if v_list else torch.tensor(0.0)
+            )
+
+        if batch_contrastive_feats:
+            flat_feats = torch.cat(batch_contrastive_feats, dim=0)
+            flat_labels = torch.cat(batch_contrastive_labels, dim=0)
+
+            if flat_feats.shape[0] >= 2:
+                # Calculate loss
+                loss_con = self.contrastive_criterion(flat_feats, flat_labels)
+                main_loss_dict["loss_contrastive"] = loss_con
+            else:
+                main_loss_dict["loss_contrastive"] = torch.tensor(
+                    0.0, device=outputs["logits"].device
+                )
+        else:
+            main_loss_dict["loss_contrastive"] = torch.tensor(
+                0.0, device=outputs["logits"].device
+            )
 
         return main_loss_dict
+
+    # def loss_relations(self, outputs, targets, indices, matching_costs, num_boxes):
+    #    losses = []
+    #    connect_losses = []
+    #    expert_logs = {
+    #        "loss_super": [],
+    #        "loss_geo": [],
+    #        "loss_poss": [],
+    #        "loss_sem": []
+    #    }
+    #    for i, ((src_index, target_index), target, matching_cost) in enumerate(
+    #        zip(indices, targets, matching_costs)
+    #    ):
+    #        full_index = torch.arange(self.num_object_queries)
+    #        uniques, counts = torch.cat([full_index, src_index]).unique(
+    #            return_counts=True
+    #        )
+    #        full_src_index = torch.cat([src_index, uniques[counts == 1]])
+    #        full_target_index = torch.cat(
+    #            [target_index, torch.arange(len(target_index), self.num_object_queries)]
+    #        )
+    #        full_matching_cost = torch.cat(
+    #            [
+    #                matching_cost,
+    #                torch.full(
+    #                    (self.num_object_queries - len(matching_cost),),
+    #                    self.nonmatching_cost,
+    #                    device=matching_cost.device,
+    #                ),
+    #            ]
+    #        )
+
+    #        target_rel = target["rel"][full_target_index][
+    #            :, full_target_index
+    #        ]  # [num_obj_queries, num_obj_queries, config.num_rel_labels]
+
+    #        rel_index = torch.nonzero(target_rel)
+    #        target_connect = torch.zeros(
+    #            target_rel.shape[0], target_rel.shape[1], 1, device=target_rel.device
+    #        )
+    #        target_connect[rel_index[:, 0], rel_index[:, 1]] = 1
+
+    #        pred_connectivity = outputs["pred_connectivity"][i, full_src_index][
+    #            :, full_src_index
+    #        ]
+
+    #        # Connectivity loss
+    #        loss = self.connectivity_loss(pred_connectivity, target_connect)
+    #        connect_losses.append(loss)
+
+    #        if self.hierarchical and isinstance(outputs["pred_rel"], dict):
+    #            pred_rel_dict = {
+    #                    k: v[i, full_src_index][:, full_src_index]
+    #                    for k, v in outputs["pred_rel"].items()
+    #                }
+
+    #            expert_stats = self._loss_experts(pred_rel_dict, target_rel)
+
+    #            losses.append(expert_stats["loss_rel"])
+    #            for k in expert_logs:
+    #                if k in expert_stats:
+    #                    expert_logs[k].append(expert_stats[k])
+    #        else:
+    #            pred_rel = outputs["pred_rel"][i, full_src_index][:, full_src_index]
+    #            if self.model_training:
+    #                loss = self._loss_relations(
+    #                    pred_rel,
+    #                    target_rel,
+    #                    full_matching_cost,
+    #                    self.rel_sample_negatives,
+    #                    self.rel_sample_nonmatching,
+    #                )
+    #            else:
+    #                loss = self._loss_relations(
+    #                    pred_rel, target_rel, full_matching_cost, None, None
+    #                )
+    #            losses.append(loss)
+
+    #    main_loss_dict = {
+    #        "loss_rel": (
+    #            torch.stack(losses).mean()
+    #            if losses
+    #            else torch.tensor(0.0, device=outputs["logits"].device)
+    #        ),
+    #        "loss_connectivity": (
+    #            torch.stack(connect_losses).mean()
+    #            if connect_losses
+    #            else torch.tensor(0.0, device=outputs["logits"].device)
+    #        ),
+    #    }
+
+    #    for k, v_list in expert_logs.items():
+    #            if v_list:
+    #                main_loss_dict[k] = torch.stack(v_list).mean()
+    #            else:
+    #                main_loss_dict[k] = torch.tensor(0.0)
+
+    #    return main_loss_dict
 
     def _hierarchical_relation_loss(
         self,
