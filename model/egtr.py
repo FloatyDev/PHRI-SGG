@@ -28,6 +28,7 @@ import math
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+from matplotlib.collections import EllipseCollection
 import matplotlib.pyplot as plt
 
 import ipdb
@@ -41,7 +42,7 @@ from model.util import (
     get_orig2idx,
     get_super_frequency_bias,
     get_super_root_frequency_bias,
-    get_class_weights
+    get_class_weights,
 )
 
 from .deformable_detr import (
@@ -130,6 +131,7 @@ class DetrSceneGraphGenerationOutput(ModelOutput):
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
+
 class DualHeadRelationClassifier(nn.Module):
     """
     Teacher-Student Classifier optimized for Distillation.
@@ -174,9 +176,9 @@ class DualHeadRelationClassifier(nn.Module):
         # Student Output (New Task)
         logits_super = self.super_head(x)
 
-        normalized_embeds = torch.nn.functional.normalize(x, p=2, dim=-1)
+        normalized_embeds = torch.nn.functional.normalize(x, p=2, dim=-1, eps=1e-6)
 
-        return logits_fine, logits_super,normalized_embeds 
+        return logits_fine, logits_super, normalized_embeds
 
 
 class BayesianRelationClassifier(nn.Module):
@@ -344,7 +346,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 hidden_dim=config.d_model,
                 num_fine_classes=50,
                 num_super_classes=3,
-                num_layers=3
+                num_layers=3,
             )
         else:
             self.rel_predictor = DeformableDetrMLPPredictionHead(
@@ -551,9 +553,7 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                     freq_bias=self.super_freq_bias,
                 )
             else:
-                pred_rel = self.rel_predictor(
-                    gated_relation_source
-                )
+                pred_rel = self.rel_predictor(gated_relation_source)
 
         else:
             # Original flat prediction
@@ -1074,12 +1074,13 @@ class SceneGraphGenerationLoss(nn.Module):
         """
         Computes Supervised Contrastive Loss on the shared embeddings.
         """
-        if "pred_rel" not in outputs or not isinstance(outputs["pred_rel"], dict):
+
+        if isinstance(outputs["pred_rel"], tuple):
+            _, _, embeddings = outputs["pred_rel"]
+        else:
             return {
                 "loss_contrastive": torch.tensor(0.0, device=outputs["logits"].device)
             }
-
-        embeddings = outputs["pred_rel"]["embeddings"]  # (B, N_Queries, N_Queries, Dim)
 
         batch_feats = []
         batch_labels = []
@@ -1123,59 +1124,6 @@ class SceneGraphGenerationLoss(nn.Module):
 
         return {"loss_contrastive": loss}
 
-    def loss_contrastive(self, outputs, targets, indices, matching_costs, num_boxes):
-        """
-        Computes Supervised Contrastive Loss on the shared embeddings.
-        """
-        if "pred_rel" not in outputs or not isinstance(outputs["pred_rel"], dict):
-            return {
-                "loss_contrastive": torch.tensor(0.0, device=outputs["logits"].device)
-            }
-
-        embeddings = outputs["pred_rel"]["embeddings"]  # (B, N_Queries, N_Queries, Dim)
-
-        batch_feats = []
-        batch_labels = []
-
-        for i, (src_idx, tgt_idx) in enumerate(indices):
-
-            target_rel = targets[i]["rel"]  # (N_tgt_objects, N_tgt_objects, 50)
-
-            matched_tgt_rel = target_rel[tgt_idx][
-                :, tgt_idx
-            ]  # (K_matched, K_matched, 50)
-
-            active_pairs_mask = (
-                matched_tgt_rel.sum(dim=-1) > 0
-            )  # (K_matched, K_matched)
-
-            if not active_pairs_mask.any():
-                continue
-
-            matched_embeds = embeddings[i, src_idx][:, src_idx]
-
-            active_embeds = matched_embeds[active_pairs_mask]  # (Num_Active, Dim)
-
-            active_labels = matched_tgt_rel[active_pairs_mask].argmax(
-                dim=-1
-            )  # (Num_Active,)
-
-            batch_feats.append(active_embeds)
-            batch_labels.append(active_labels)
-
-        if len(batch_feats) == 0:
-            return {"loss_contrastive": torch.tensor(0.0, device=embeddings.device)}
-
-        flat_feats = torch.cat(batch_feats, dim=0)
-        flat_labels = torch.cat(batch_labels, dim=0)
-
-        if flat_feats.shape[0] < 2:
-            return {"loss_contrastive": torch.tensor(0.0, device=embeddings.device)}
-
-        loss = self.contrastive_criterion(flat_feats, flat_labels)
-
-        return {"loss_contrastive": loss * self.contrastive_weight}
-
     def loss_relations(self, outputs, targets, indices, matching_costs, num_boxes):
         losses = []
         connect_losses = []
@@ -1184,7 +1132,6 @@ class SceneGraphGenerationLoss(nn.Module):
         rel_distill_losses = []
         batch_contrastive_feats = []
         batch_contrastive_labels = []
-
 
         for i, ((src_index, target_index), target, matching_cost) in enumerate(
             zip(indices, targets, matching_costs)
@@ -1224,7 +1171,7 @@ class SceneGraphGenerationLoss(nn.Module):
             connect_losses.append(loss)
 
             if self.hierarchical and isinstance(outputs["pred_rel"], tuple):
-                raw_pred_fine, raw_pred_super = outputs["pred_rel"]
+                raw_pred_fine, raw_pred_super, raw_embeds = outputs["pred_rel"]
 
                 pred_fine = raw_pred_fine[i, full_src_index][:, full_src_index]
                 pred_super = raw_pred_super[i, full_src_index][:, full_src_index]
@@ -1239,38 +1186,57 @@ class SceneGraphGenerationLoss(nn.Module):
                 rel_distill_losses.append(loss_distill_dict["loss_rel_distill"])
                 # The dictionary contains the summed loss
                 losses.append(loss_distill_dict["loss_rel"])
-                if "embeddings" in outputs["pred_rel"]:
-                    raw_embeds = outputs["pred_rel"]["embeddings"][i]  # (N_q, N_q, D)
 
-                    orig_target_rel = target["rel"]  # The original, un-permuted target
-                    matched_gt_rel = orig_target_rel[target_index][:, target_index]
+                orig_target_rel = target["rel"]  # The original, un-permuted target
+                matched_gt_rel = orig_target_rel[target_index][:, target_index]
 
-                    active_pairs = matched_gt_rel.sum(dim=-1) > 0
+                active_pairs = matched_gt_rel.sum(dim=-1) > 0
 
-                    if active_pairs.any():
-                        matched_embeds = raw_embeds[src_index][:, src_index]
+                if active_pairs.any():
+                    matched_embeds = raw_embeds[i, src_index][:, src_index]
 
-                        batch_contrastive_feats.append(matched_embeds[active_pairs])
-                        batch_contrastive_labels.append(
-                            matched_gt_rel[active_pairs].argmax(dim=-1)
-                        )
+                    batch_contrastive_feats.append(matched_embeds[active_pairs])
+                    batch_contrastive_labels.append(
+                        matched_gt_rel[active_pairs].argmax(dim=-1)
+                    )
             else:
                 # (Keep your original flat-mode logic here)
                 pred_rel = outputs["pred_rel"][i, full_src_index][:, full_src_index]
                 if self.model_training:
                     loss = self._loss_relations(
-                        pred_rel, target_rel, full_matching_cost, 
-                        self.rel_sample_negatives, self.rel_sample_nonmatching
+                        pred_rel,
+                        target_rel,
+                        full_matching_cost,
+                        self.rel_sample_negatives,
+                        self.rel_sample_nonmatching,
                     )
                 else:
-                    loss = self._loss_relations(pred_rel, target_rel, full_matching_cost, None, None)
+                    loss = self._loss_relations(
+                        pred_rel, target_rel, full_matching_cost, None, None
+                    )
                 losses.append(loss)
 
         main_loss_dict = {
-            "loss_rel": torch.stack(losses).mean() if losses else torch.tensor(0.0, device=outputs["logits"].device),
-            "loss_connectivity": torch.stack(connect_losses).mean() if connect_losses else torch.tensor(0.0, device=outputs["logits"].device),
-            "loss_rel_ce": torch.stack(rel_ce_losses).mean() if connect_losses else torch.tensor(0.0, device=outputs["logits"].device),
-            "loss_rel_distill": torch.stack(rel_distill_losses).mean() if connect_losses else torch.tensor(0.0, device=outputs["logits"].device),
+            "loss_rel": (
+                torch.stack(losses).mean()
+                if losses
+                else torch.tensor(0.0, device=outputs["logits"].device)
+            ),
+            "loss_connectivity": (
+                torch.stack(connect_losses).mean()
+                if connect_losses
+                else torch.tensor(0.0, device=outputs["logits"].device)
+            ),
+            "loss_rel_ce": (
+                torch.stack(rel_ce_losses).mean()
+                if connect_losses
+                else torch.tensor(0.0, device=outputs["logits"].device)
+            ),
+            "loss_rel_distill": (
+                torch.stack(rel_distill_losses).mean()
+                if connect_losses
+                else torch.tensor(0.0, device=outputs["logits"].device)
+            ),
         }
 
         if batch_contrastive_feats:
