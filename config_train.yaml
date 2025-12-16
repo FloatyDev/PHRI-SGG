@@ -65,3 +65,4 @@ num_negatives: 49
 super_weight: 1
 train_head: true
 artifact_path: "artifacts/"
+flat_path: "artifacts/"
