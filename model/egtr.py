@@ -129,7 +129,6 @@ class DetrSceneGraphGenerationOutput(ModelOutput):
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-
 class DualHeadRelationClassifier(nn.Module):
     """
     Teacher-Student Classifier optimized for Distillation.
@@ -165,8 +164,6 @@ class DualHeadRelationClassifier(nn.Module):
         # Ignore det_logits, etc. as Flat-50 didn't use them.
 
         x = features
-
-        # Pass through Shared Layers (with ReLU)
         for layer in self.shared_layers:
             x = F.relu(layer(x))
 
@@ -176,7 +173,7 @@ class DualHeadRelationClassifier(nn.Module):
         # Student Output (New Task)
         logits_super = self.super_head(x)
 
-        return logits_fine, logits_super
+        return logits_fine, logits_super, x
 
 
 class BayesianRelationClassifier(nn.Module):
@@ -585,7 +582,14 @@ class DetrForSceneGraphGeneration(DeformableDetrPreTrainedModel):
                 smoothing=self.config.smoothing,
             )  # the same as loss coefficients
             # Second: create the criterion
-            losses = ["labels", "boxes", "relations", "cardinality", "uncertainty"]
+            losses = [
+                "labels",
+                "boxes",
+                "relations",
+                "cardinality",
+                "uncertainty",
+                "contrastive",
+            ]
             criterion = SceneGraphGenerationLoss(
                 matcher=matcher,
                 num_object_queries=num_object_queries,
@@ -850,7 +854,10 @@ class SceneGraphGenerationLoss(nn.Module):
                 persistent=True,
             )
             class_weights = get_class_weights(fg_matrix)
-            self.super_loss = nn.CrossEntropyLoss(weight=class_weights, reduction="none")
+            self.super_loss = nn.CrossEntropyLoss(
+                weight=class_weights, reduction="none"
+            )
+            self.contrastive_criterion = SupConLossHierar(temperature=0.1)
         else:
             # Original BCEWithLogitsLoss for flat mode
             self.rel_loss = torch.nn.BCEWithLogitsLoss(reduction="none")
@@ -1059,6 +1066,59 @@ class SceneGraphGenerationLoss(nn.Module):
             "loss_rel_distill": loss_distill,
         }
 
+    def loss_contrastive(self, outputs, targets, indices, matching_costs, num_boxes):
+        """
+        Computes Supervised Contrastive Loss on the shared embeddings.
+        """
+        if "pred_rel" not in outputs or not isinstance(outputs["pred_rel"], dict):
+            return {
+                "loss_contrastive": torch.tensor(0.0, device=outputs["logits"].device)
+            }
+
+        embeddings = outputs["pred_rel"]["embeddings"]  # (B, N_Queries, N_Queries, Dim)
+
+        batch_feats = []
+        batch_labels = []
+
+        for i, (src_idx, tgt_idx) in enumerate(indices):
+
+            target_rel = targets[i]["rel"]  # (N_tgt_objects, N_tgt_objects, 50)
+
+            matched_tgt_rel = target_rel[tgt_idx][
+                :, tgt_idx
+            ]  # (K_matched, K_matched, 50)
+
+            active_pairs_mask = (
+                matched_tgt_rel.sum(dim=-1) > 0
+            )  # (K_matched, K_matched)
+
+            if not active_pairs_mask.any():
+                continue
+
+            matched_embeds = embeddings[i, src_idx][:, src_idx]
+
+            active_embeds = matched_embeds[active_pairs_mask]  # (Num_Active, Dim)
+
+            active_labels = matched_tgt_rel[active_pairs_mask].argmax(
+                dim=-1
+            )  # (Num_Active,)
+
+            batch_feats.append(active_embeds)
+            batch_labels.append(active_labels)
+
+        if len(batch_feats) == 0:
+            return {"loss_contrastive": torch.tensor(0.0, device=embeddings.device)}
+
+        flat_feats = torch.cat(batch_feats, dim=0)
+        flat_labels = torch.cat(batch_labels, dim=0)
+
+        if flat_feats.shape[0] < 2:
+            return {"loss_contrastive": torch.tensor(0.0, device=embeddings.device)}
+
+        loss = self.contrastive_criterion(flat_feats, flat_labels)
+
+        return {"loss_contrastive": loss}
+
     def loss_relations(self, outputs, targets, indices, matching_costs, num_boxes):
         losses = []
         connect_losses = []
@@ -1100,10 +1160,15 @@ class SceneGraphGenerationLoss(nn.Module):
             pred_connectivity = outputs["pred_connectivity"][i, full_src_index][
                 :, full_src_index
             ]
-
-            # Connectivity loss
             loss = self.connectivity_loss(pred_connectivity, target_connect)
             connect_losses.append(loss)
+
+            if self.hierarchical and isinstance(outputs["pred_rel"], dict):
+                pred_rel_dict = {
+                    k: v[i, full_src_index][:, full_src_index]
+                    for k, v in outputs["pred_rel"].items()
+                    if k != "embeddings"
+                }
 
             if self.hierarchical and isinstance(outputs["pred_rel"], tuple):
                 raw_pred_fine, raw_pred_super = outputs["pred_rel"]
@@ -1121,7 +1186,6 @@ class SceneGraphGenerationLoss(nn.Module):
                 rel_distill_losses.append(loss_distill_dict["loss_rel_distill"])
                 # The dictionary contains the summed loss
                 losses.append(loss_distill_dict["loss_rel"])
-
             else:
                 pred_rel = outputs["pred_rel"][i, full_src_index][:, full_src_index]
                 if self.model_training:
@@ -1317,6 +1381,7 @@ class SceneGraphGenerationLoss(nn.Module):
             "masks": self.loss_masks,
             "relations": self.loss_relations,
             "uncertainty": self.loss_uncertainty,
+            "contrastive": self.loss_contrastive,
         }
         assert loss in loss_map, f"Loss {loss} not supported"
         return loss_map[loss](outputs, targets, indices, matching_costs, num_boxes)
