@@ -173,7 +173,9 @@ class DualHeadRelationClassifier(nn.Module):
         # Student Output (New Task)
         logits_super = self.super_head(x)
 
-        return logits_fine, logits_super, x
+        normalized_embeds = torch.nn.functional.normalize(x, p=2, dim=-1)
+
+        return logits_fine, logits_super,normalized_embeds 
 
 
 class BayesianRelationClassifier(nn.Module):
