@@ -50,7 +50,8 @@ from model.util import (
     SuperRelationConfusionMatrix,
     ExpertDiagnosticsCallback,
     surgery_initialize_experts,
-    run_surgery_sanity_check
+    run_surgery_sanity_check,
+    RouterCalibrationLogger,
 )
 import wandb
 
@@ -270,6 +271,7 @@ class SGG(pl.LightningModule):
         config.super_weight = super_weight
         config.use_class_context = use_class_context
         config.flat_path = flat_path
+        config.id2label = id2label
 
         self.config = config
 
@@ -371,6 +373,7 @@ class SGG(pl.LightningModule):
                 "rel_predictor.expert_geo",
                 "rel_predictor.expert_poss",
                 "rel_predictor.expert_sem",
+                "rel_predictor.shared_layers",
             ]
 
             # Unfreeze specific modules
@@ -386,9 +389,9 @@ class SGG(pl.LightningModule):
             ), "Experts are not trainable!"
             assert any("super_head" in t for t in trainable), "Super Head is frozen!"
             # We explicitly want shared_layers FROZEN to prevent 'shock' from the new experts destroying the router features
-            #assert not any(
+            # assert not any(
             #    "shared_layers" in t for t in trainable
-            #), "Shared Layers leaked into training!"
+            # ), "Shared Layers leaked into training!"
 
             count_trainable(model=self.model, debugging=True)
             print(f"[sgg] Final Trainable Parameter Count: {len(trainable)}")
@@ -1025,6 +1028,9 @@ if __name__ == "__main__":
     )
     cm_callback = SuperRelationConfusionMatrix(id2label=id2label)
     expert_callback = ExpertDiagnosticsCallback()
+    router_calibration_cb = RouterCalibrationLogger(
+        device="cuda", rel_categories=rel_categories
+    )
 
     class SaveConfigCallback(Callback):
         def __init__(self, config_path, log_dir, wandb_logger=None):
@@ -1084,6 +1090,7 @@ if __name__ == "__main__":
                     config_callback,
                     cm_callback,
                     expert_callback,
+                    router_calibration_cb,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
@@ -1200,6 +1207,7 @@ if __name__ == "__main__":
                     lr_monitor_callback,
                     cm_callback,
                     expert_callback,
+                    router_calibration_cb,
                 ],
                 accumulate_grad_batches=args.accumulate,
             )
