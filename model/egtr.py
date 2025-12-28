@@ -858,8 +858,14 @@ class SceneGraphGenerationLoss(nn.Module):
                 persistent=True,
             )
             class_weights = get_class_weights(fg_matrix)
-            self.super_loss = nn.CrossEntropyLoss(
-                weight=class_weights, reduction="none"
+            # self.super_loss = nn.CrossEntropyLoss(
+            #    weight=class_weights, reduction="none"
+            # )
+            self.super_loss = FocalLoss(
+                alpha=class_weights,
+                task_type="multi-class",
+                num_classes=3,
+                reduction="none",
             )
             self.contrastive_criterion = SupConLossHierar(temperature=0.1)
         else:
