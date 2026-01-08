@@ -64,11 +64,16 @@ def evaluate_batch(
     family_sgg_evaluator_list,
     num_labels,
     max_topk=100,
+    hierarchical=True,
+    partition_data=None,
 ):
-    """
-    Evaluates a single batch for Super-Relation (Hierarchical) performance.
-    """
-    orig2fam = get_super_rel_map()
+    if hierarchical:
+        if partition_data is not None:
+            orig2fam = partition_data["super_rel_map"]
+            orig2famidx = partition_data["orig2idx"]
+        else:
+            orig2fam = get_super_rel_map()
+            orig2famidx = get_orig2idx()[0]
 
     pred_rel_raw = outputs["pred_rel"]
     if isinstance(pred_rel_raw, tuple):
@@ -359,7 +364,11 @@ class SGG(pl.LightningModule):
             for p in self.model.parameters():
                 p.requires_grad = False
 
-            allow = ("rel_predictor.super_head", "rel_predictor.shared_layers", "rel_predictor.fine_head")
+            allow = (
+                "rel_predictor.super_head",
+                "rel_predictor.shared_layers",
+                "rel_predictor.fine_head",
+            )
 
             for n, p in self.model.named_parameters():
                 if any(x in n for x in allow):
@@ -668,6 +677,40 @@ class SGG(pl.LightningModule):
         return val_dataloader
 
 
+def generate_partition_data(seed, num_geo, num_poss, num_sem, num_total=50):
+    print(f"Generating random partition with seed {seed}")
+    assert num_geo + num_poss + num_sem == num_total, "Partition sizes don't match"
+
+    predicate_ids = list(range(num_total))
+    rng = np.random.default_rng(seed)
+    rng.shuffle(predicate_ids)
+
+    geo_preds = sorted(predicate_ids[:num_geo])
+    poss_preds = sorted(predicate_ids[num_geo : num_geo + num_poss])
+    sem_preds = sorted(predicate_ids[num_geo + num_poss :])
+
+    super_rel_map = [0] * num_total
+    orig2idx = [0] * num_total
+
+    for i, pred_id in enumerate(geo_preds):
+        super_rel_map[pred_id] = 0
+        orig2idx[pred_id] = i
+    for i, pred_id in enumerate(poss_preds):
+        super_rel_map[pred_id] = 1
+        orig2idx[pred_id] = i
+    for i, pred_id in enumerate(sem_preds):
+        super_rel_map[pred_id] = 2
+        orig2idx[pred_id] = i
+
+    return {
+        "super_rel_map": super_rel_map,
+        "orig2idx": torch.tensor(orig2idx, dtype=torch.long),
+        "num_geo": num_geo,
+        "num_poss": num_poss,
+        "num_sem": num_sem,
+    }
+
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -745,6 +788,13 @@ def build_parser(parser):
     parser.add_argument("--artifact_path", type=str, default="")
     parser.add_argument("--load_model", type=str, default="")
     parser.add_argument("--use_class_context", type=str2bool, default=False)
+    parser.add_argument(
+        "--random_partition_seed",
+        type=int,
+        default=None,
+        help="Seed for random partition generation. "
+        "If None, uses the default manual partition.",
+    )
 
     return parser
 
@@ -779,7 +829,28 @@ def parse_args():
 if __name__ == "__main__":
 
     args = parse_args()
+    orig2famidx, num_geo, num_poss, num_sem = get_orig2idx()
+    args.num_geometric = num_geo
+    args.num_possessive = num_poss
+    args.num_semantic = num_sem
 
+    if args.random_partition_seed is not None:
+        partition_data = generate_partition_data(
+            seed=args.random_partition_seed,
+            num_total=50,  # Assuming 50 total predicates for VG
+            num_geo=args.num_geometric,
+            num_poss=args.num_possessive,
+            num_sem=args.num_semantic,
+        )
+    else:
+        # Load the default manual partition
+        partition_data = {
+            "super_rel_map": get_super_rel_map(),
+            "orig2idx": orig2famidx,
+            "num_geo": num_geo,
+            "num_poss": num_poss,
+            "num_sem": num_sem,
+        }
     if args.from_scratch:
         args.pretrained = args.architecture
 
@@ -909,6 +980,8 @@ if __name__ == "__main__":
         name += "__train_rel_head"
     if args.resume:
         version = args.version  # for resuming
+    if args.random_partition_seed:
+        name += f"__seed_{args.random_partition_seed}"
     else:
         version = None  #  If version is not specified the logger inspects the save directory for existing versions, then automatically assigns the next available version.
 
@@ -917,7 +990,7 @@ if __name__ == "__main__":
 
     # initialize wandblogger
     wandb_logger = WandbLogger(
-        project="hier-egtr_family_classifier",
+        project="hier-egtr_family_classifier_perm",
         log_model=False,
         save_dir="./logs",
         name=name,
