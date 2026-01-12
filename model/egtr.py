@@ -169,7 +169,6 @@ class ExpertRelationClassifier(nn.Module):
         for layer in self.shared_layers:
             x = F.relu(layer(x))
 
-        # 1. Get Router Scores (Logits)
         logits_super = self.super_head(x)  # (B, N, N, 3)
 
         raw_geo = self.expert_geo(x)
@@ -238,7 +237,6 @@ class DualHeadRelationClassifier(nn.Module):
     ):
         super(DualHeadRelationClassifier, self).__init__()
 
-        # --- Shared Layers (The Frozen Feature Extractor) ---
         self.shared_layers = nn.ModuleList()
 
         self.shared_layers.append(nn.Linear(input_dim, hidden_dim))
@@ -248,23 +246,17 @@ class DualHeadRelationClassifier(nn.Module):
 
         self.fine_head = nn.Linear(hidden_dim, num_fine_classes)
 
-        # This is the only layer you will train.
         self.super_head = nn.Linear(hidden_dim, num_super_classes)
 
     def forward(self, features):
-        # features: [Batch, Num_Queries, Num_Queries, Input_Dim]
-        # Ignore det_logits, etc. as Flat-50 didn't use them.
 
         x = features
 
-        # Pass through Shared Layers (with ReLU)
         for layer in self.shared_layers:
             x = F.relu(layer(x))
 
-        # Teacher Output (Frozen Features)
         logits_fine = self.fine_head(x)
 
-        # Student Output (New Task)
         logits_super = self.super_head(x)
 
         return logits_fine, logits_super
