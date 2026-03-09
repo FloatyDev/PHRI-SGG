@@ -164,16 +164,13 @@ class DualHeadRelationClassifier(nn.Module):
 
     def forward(self, features):
         # features: [Batch, Num_Queries, Num_Queries, Input_Dim]
-        # Ignore det_logits, etc. as Flat-50 didn't use them.
 
         x = features
         for layer in self.shared_layers:
             x = F.relu(layer(x))
 
-        # Teacher Output (Frozen Features)
         logits_fine = self.fine_head(x)
 
-        # Student Output (New Task)
         logits_super = self.super_head(x)
 
         normalized_embeds = torch.nn.functional.normalize(x, p=2, dim=-1, eps=1e-6)
