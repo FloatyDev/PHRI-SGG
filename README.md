@@ -82,7 +82,7 @@ The Semantic family — containing the most informative interactions — represe
 | R@50     | 0.302       | 0.277    | -0.025      | -8.2%    |
 | R@100    | 0.344       | 0.318    | -0.026      | -7.5%    |
 
-The modest drop in R@K is a **feature, not a bug** — it reflects the model redirecting probability mass away from generic head classes toward semantically informative tail predicates.
+The modest drop in R@K reflects the model redirecting probability mass away from generic head classes toward semantically informative tail predicates.
 
 ### Selected Per-Class Gains (R@100)
 
