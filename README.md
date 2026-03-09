@@ -92,8 +92,6 @@ The modest drop in R@K is a **feature, not a bug** — it reflects the model red
 | walking on   | Semantic | 0.050 | 0.241    | +381.5%    |
 | riding       | Semantic | 0.277 | 0.491    | +77.1%     |
 | sitting on   | Semantic | 0.132 | 0.248    | +87.9%     |
-| says         | Semantic | 0.000 | 0.083    | **New**    |
-| growing on   | Semantic | 0.000 | 0.017    | **New**    |
 
 ---
 
@@ -148,39 +146,67 @@ dataset/
 
 ## Training
 
-PHRI-SGG is trained in two stages.
+Both stages use `train_phri.py` with a YAML config file. Pass `--config config_train.yaml`
+instead of individual flags. The script saves a copy of the config to the training log
+directory automatically. CLI flags always override the config file if provided alongside `--config`.
 
 ### Stage 1 — Pretrain the Super-Relation Router
 
-Before training the full hierarchical model, the super-classifier (family router) is
-pretrained in isolation using a `DualHeadRelationClassifier`. This module shares the
-frozen MLP layers of a converged Flat-50 checkpoint and adds a lightweight 3-class
-head on top, predicting one of three semantic families: Geometric, Possessive, Semantic.
+> Branch: `super_classifier_training`
 
+The super-classifier is pretrained in isolation using a `DualHeadRelationClassifier`.
+This module shares the frozen MLP layers of a converged Flat-50 checkpoint and adds
+a lightweight 3-class head on top (Geometric / Possessive / Semantic).
+Only the `super_head` linear layer is trained.
 ```bash
-python train_egtr.py \
-  --data_path dataset/visual_genome \
-  --pretrained $PRETRAINED_DETECTOR_PATH \
-  --main_trained $FLAT_BASELINE_CKPT \
-  --output_path $OUTPUT_PATH \
-  --backbone_dirpath $BACKBONE_DIRPATH
+python train_phri.py --config config_train.yaml
 ```
-
-> This script is located on the `hier_fam_classifier` branch.  
-> The shared MLP layers are loaded from the Flat-50 checkpoint and kept frozen.  
-> Only the `super_head` (3-class linear layer) is trained.
 
 ### Stage 2 — Train PHRI-SGG with Expert Modules
 
-The pretrained super-classifier checkpoint from Stage 1 is used to warm-start the
-full PHRI-SGG model, which replaces the flat head with three family experts.
-Training uses the same `train_egtr.py` entry point on the `hier_training_distill` branch.
+> Branch: `main`
 
-> ⚠️ A unified training script consolidating both stages is planned.
+The pretrained super-classifier checkpoint from Stage 1 warm-starts the full
+PHRI-SGG model with three family experts. The ResNet-50 backbone and Deformable
+DETR encoder-decoder are frozen. Only the hierarchical heads and final projection
+layers receive gradient updates.
+```bash
+python train_phri.py --config config_train.yaml
+```
 
-**Frozen Backbone Strategy:** The ResNet-50 backbone and Deformable DETR
-encoder-decoder layers are frozen throughout. Only the hierarchical heads and
-final projection layers receive gradient updates.
+### Config file (`config_train.yaml`)
+
+A `config_train.yaml` is provided at the root of the repository. Key fields to update
+before running:
+```yaml
+# --- Paths (update these) ---
+data_path: "dataset/visual_genome"
+output_path: "results/"
+pretrained: "path/to/pretrained_detr_checkpoint"
+flat_path: "artifacts/"          # path to converged Flat-50 checkpoint (Stage 2)
+
+# --- Hierarchical settings ---
+hierarchical: true
+num_geometric: 15
+num_possessive: 11
+num_semantic: 24
+super_weight: 1
+train_head: true
+
+# --- Loss coefficients ---
+rel_loss_coefficient: 15.0
+connectivity_loss_coefficient: 30.0
+
+# --- Training ---
+gpus: 1
+batch_size: 4
+max_epochs: 20
+lr: 2.0e-6
+lr_initialized: 2.0e-4
+lr_backbone: 2.0e-7
+```
+
+All available options and their defaults are documented inside `config_train.yaml`.
 
 **Hardware:** 2× NVIDIA GPU, batch size 16 per GPU, AdamW optimizer,
 learning rate 2×10⁻⁵ for hierarchical heads and 2×10⁻⁶ for unfrozen decoder components.
@@ -196,8 +222,7 @@ PHRI-SGG/
 ├── lib/
 │   └── evaluation/
 │       └── sg_eval.py       # SGG evaluation (R@K, mR@K)
-├── train_egtr.py            # Flat baseline training
-├── train_hier_distill.py    # PHRI-SGG hierarchical training
+├── train_phri.py            # PHRI-SGG hierarchical training / Super-Classifier training (super_classifier_training branch)
 ├── pretrain_detr.py         # Object detector pretraining
 └── requirements.txt
 ```
