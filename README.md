@@ -247,5 +247,7 @@ This work builds on EGTR:
 ## Acknowledgements
 
 The EGTR codebase provided the foundational architecture for feature extraction, connectivity prediction, and relation smoothing on which PHRI-SGG is built.
+
 I also want to thank my supervisor Prof. Antonis Argyros and Assistant Professor Konstantinos Papoutsakis for their collaboration and their help in the development of this project.
+
 Finally, the computational resources for this work were provided by the Human-Centered Computer Vision group (HCCV) of the Computational Vision and Robotics Laboratory (CVRL) withing the Institute of Computer Science, Foundation of Research and Technology-Hellas (FORTH).
