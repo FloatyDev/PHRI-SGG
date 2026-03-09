@@ -3,6 +3,7 @@
 # PHRI-SGG: Probabilistic Hierarchical Relation Inference for Scene Graph Generation
 
 **Thesis Project — Giorgos Sygkelakis, January 2026**
+[![Thesis](https://img.shields.io/badge/Thesis-PDF-red)](thesis/PHRI-SGG_thesis.pdf)
 
 > Built on top of [EGTR](https://github.com/naver-ai/egtr) (CVPR 2024).  
 > This repository extends EGTR with a probabilistic hierarchical relation inference framework to mitigate long-tail bias in Scene Graph Generation.
