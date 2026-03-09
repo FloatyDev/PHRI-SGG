@@ -1,150 +1,224 @@
 <div align="center">
-    
-# EGTR: Extracting Graph from Transformer for Scene Graph Generation [CVPR 2024 Best paper award candidate]
 
-[![Paper](https://img.shields.io/badge/Paper-arxiv.2404.02072-green)](https://arxiv.org/abs/2404.02072)
-[![CVPR](https://img.shields.io/badge/CVPR-2024-steelblue)](https://openaccess.thecvf.com/content/CVPR2024/html/Im_EGTR_Extracting_Graph_from_Transformer_for_Scene_Graph_Generation_CVPR_2024_paper.html)
-[![Poster](https://img.shields.io/badge/Poster-Image-blue)](https://cvpr.thecvf.com/media/PosterPDFs/CVPR%202024/31166.png?t=1719244488.0932813)
-[![Oral](https://img.shields.io/badge/Oral-Slides-orange)](https://cvpr.thecvf.com/media/cvpr-2024/Slides/32054_UhZdVUe.pdf)
-[![Youtube](https://img.shields.io/badge/Youtube-Video-red)](https://www.youtube.com/watch?v=w4DWd3mp2Wk)
+# PHRI-SGG: Probabilistic Hierarchical Relation Inference for Scene Graph Generation
+
+**Thesis Project — Giorgos Sygkelakis, January 2026**
+
+> Built on top of [EGTR](https://github.com/naver-ai/egtr) (CVPR 2024).  
+> This repository extends EGTR with a probabilistic hierarchical relation inference framework to mitigate long-tail bias in Scene Graph Generation.
 
 </div>
 
-## Architecture
-
-<p align="center"><img width="1000" alt="image" src="misc/architecture.png"></p>
+---
 
 ## Abstract
-> Scene Graph Generation (SGG) is a challenging task of detecting objects and predicting relationships between objects. After DETR was developed, one-stage SGG models based on a one-stage object detector have been actively studied. However, complex modeling is used to predict the relationship between objects, and the inherent relationship between object queries learned in the multi-head self-attention of the object detector has been neglected. We propose a lightweight one-stage SGG model that extracts the relation graph from the various relationships learned in the multi-head self-attention layers of the DETR decoder. By fully utilizing the self-attention by-products, the relation graph can be extracted effectively with a shallow relation extraction head. Considering the dependency of the relation extraction task on the object detection task, we propose a novel relation smoothing technique that adjusts the relation label adaptively according to the quality of the detected objects. By the relation smoothing, the model is trained according to the continuous curriculum that focuses on object detection task at the beginning of training and performs multi-task learning as the object detection performance gradually improves. Furthermore, we propose a connectivity prediction task that predicts whether a relation exists between object pairs as an auxiliary task of the relation extraction. We demonstrate the effectiveness and efficiency of our method for the Visual Genome and Open Image V6 datasets. Our code is publicly available at https://github.com/naver-ai/egtr.
 
-## Updates
-- `2024-06-19`: Code and model checkpoints have been released. 🚀
-- `2024-05-22`: EGTR is nominated as a best paper award candidate! 🏆 (24 / 2,719 = 0.9% of the accepted papers)
-- `2024-04-04`: EGTR has been selected as an oral! 🎉 (90 / 2,719 = 3.3% of the accepted papers)
-- `2024-02-26`: EGTR has been accepted to CVPR 2024! 🎉 (2,719 / 11,532 = 23.6% acceptance rate)
+Scene Graph Generation (SGG) is dominated by long-tailed predicate distributions, causing flat classifiers to over-predict generic relations like *on* and *wearing*, at the expense of informative, fine-grained semantics. To address this problem, we present **PHRI-SGG** (Probabilistic Hierarchical Relation Inference for Scene Graph Generation), where a super-classifier first predicts a coarse semantic family and statically routes features to specialized family experts that refine the predicate. We realize this with:
 
-## Usage
+- **(a)** Logit-space fusion for soft routing
+- **(b)** A separate connectivity gate to decouple edge existence from semantics
+- **(c)** Weight transfer from a converged flat baseline to warm-start the experts
+- **(d)** Router pretraining via family-level distillation
+- **(e)** A supervised contrastive objective, restricted within families
 
-### Install dependencies
+PHRI-SGG improves mean recall on VG150 while overall R@20/50/100 decreases modestly, reflecting a deliberate trade-off from generic to specific predictions. Gains concentrate on tail predicates and coincide with fewer hallucinations of head classes, demonstrating that explicit hierarchical decomposition yields more semantically precise scene graphs under long-tail conditions.
 
-Docker image: [nvcr.io/nvidia/pytorch:21.11-py3](http://nvcr.io/nvidia/pytorch:21.11-py3)
+---
+
+## Architecture
+
+The PHRI-SGG pipeline builds on EGTR's efficient one-stage graph extraction and replaces its flat 50-class relation head with a modular, two-step hierarchical inference system.
+
+### Overview
+
+1. **Feature Extraction (EGTR backbone):** A ResNet-50 + Deformable DETR encoder-decoder extracts per-object query features. Relation edge features `z_sub,obj` are constructed from attention by-products (Q/K projections across decoder layers) aggregated via a learnable gated sum.
+
+2. **Connectivity Gate:** A binary classification head predicts whether a relation *exists* between a pair, decoupling the *existence* decision from *semantic* classification.
+
+3. **Super-Relation Router:** A lightweight classifier predicts one of three coarse semantic families  (**Geometric**, **Possessive**, or **Semantic**) acting as a soft router over the shared edge features.
+
+4. **Family Experts:** Three specialized sub-networks, each trained exclusively on their own relation family:
+   - **Geometric Expert** — spatial relations (*on, under, near, behind*, ...)
+   - **Possessive Expert** — ownership/part-whole relations (*has, part of, wearing*, ...)
+   - **Semantic Expert** — active interactions (*riding, eating, looking at*, ...)
+
+5. **Logit-Space Fusion:** The expert logits are fused back into a global N×N×50 prediction matrix and normalized via Softmax before evaluation.
+
+### Relation Family Distribution in VG150
+
+| Family      | Count   | Percentage |
+|-------------|---------|------------|
+| Geometric   | 157,252 | 49.82%     |
+| Possessive  | 130,928 | 41.48%     |
+| Semantic    | 27,462  | 8.70%      |
+| **Total**   | **315,642** | **100%** |
+
+The Semantic family — containing the most informative interactions — represents fewer than 9% of training samples, making it the primary target of PHRI-SGG's debiasing effort.
+
+---
+
+## Key Contributions
+
+- **Hierarchical SGG framework:** Replaces the standard flat classifier with a statically-routed modular architecture combining coarse family routing with fine-grained predicate prediction.
+
+- **Long-tail debiasing by design:** By isolating the Semantic expert from geometric gradient dominance, PHRI-SGG enables learning of subtle visual features for rare classes like *parked on*, *attached to*, and *standing on* that had near-zero recall in the flat baseline.
+
+- **Hallucination reduction:** The hierarchical constraint forces the model to be more discriminative, reducing false positives for dominant head classes like *wearing* and *on*.
+
+- **Specificity over generality:** Generic predictions (*on*, *at*) are redirected to their precise counterparts (*sitting on*, *riding*, *parked on*), producing semantically richer scene graphs.
+
+---
+
+## Results on VG150 (SGDet, graph-constraint)
+
+| Metric   | EGTR (baseline) | PHRI-SGG | Abs. Change | % Change |
+|----------|:-----------:|:--------:|:-----------:|:--------:|
+| mR@20    | 0.055       | **0.071** | +0.016     | **+29.1%** |
+| mR@50    | 0.079       | **0.098** | +0.019     | **+24.1%** |
+| mR@100   | 0.101       | **0.119** | +0.018     | **+17.8%** |
+| R@20     | 0.235       | 0.215    | -0.020      | -8.5%    |
+| R@50     | 0.302       | 0.277    | -0.025      | -8.2%    |
+| R@100    | 0.344       | 0.318    | -0.026      | -7.5%    |
+
+The modest drop in R@K is a **feature, not a bug** — it reflects the model redirecting probability mass away from generic head classes toward semantically informative tail predicates.
+
+### Selected Per-Class Gains (R@100)
+
+| Predicate    | Family   | EGTR  | PHRI-SGG | Impact     |
+|--------------|----------|-------|----------|------------|
+| parked on    | Semantic | 0.017 | 0.445    | +2516.2%   |
+| attached to  | Semantic | 0.006 | 0.056    | +831.7%    |
+| standing on  | Semantic | 0.025 | 0.183    | +631.6%    |
+| walking on   | Semantic | 0.050 | 0.241    | +381.5%    |
+| riding       | Semantic | 0.277 | 0.491    | +77.1%     |
+| sitting on   | Semantic | 0.132 | 0.248    | +87.9%     |
+| says         | Semantic | 0.000 | 0.083    | **New**    |
+| growing on   | Semantic | 0.000 | 0.017    | **New**    |
+
+---
+
+## Loss Function
+
+The total training objective is a weighted sum of four components:
 
 ```
+L_total = λ_rel (L_super + L_experts) + λ_conn L_conn + λ_supcon L_supcon + L_od
+```
+
+| Component      | Description                                              | Coefficient |
+|----------------|----------------------------------------------------------|-------------|
+| `L_super`      | Cross-entropy on the coarse family prediction            | λ_rel = 1   |
+| `L_experts`    | Conditional masked cross-entropy within each family      | λ_rel = 1   |
+| `L_conn`       | Binary connectivity (foreground vs. background pairs)    | λ_conn = 30 |
+| `L_supcon`     | Supervised contrastive loss on shared embeddings         | λ_supcon = 1|
+| `L_od`         | Standard DETR object detection loss                      | λ_cls=1, λ_L1=5, λ_IoU=2 |
+
+---
+
+## Installation
+
+### Dependencies
+
+Same environment as EGTR:
+
+```bash
+# Docker image: nvcr.io/nvidia/pytorch:21.11-py3
 pip install -r requirements.txt
 cd lib/fpn
 sh make.sh
 ```
 
-### Download dataset
+### Dataset
 
-EGTR is trained and evaluated on two representative SGG datasets: Visual Genome and Open Image V6. Please refer to below links.
+Evaluated on **Visual Genome (VG150)** using the standard splits from [Neural Motifs](https://github.com/rowanz/neural-motifs).
 
-- Visual Genome: https://github.com/yrcong/RelTR/blob/main/data/README.md
-- Open Image V6: https://github.com/Scarecrow0/SGTR/blob/main/DATASET.md
+- Download instructions: https://github.com/yrcong/RelTR/blob/main/data/README.md
 
-The final directory structure will be as follows:
 ```
-dataset
-│   
-└───visual_genome
-│   │
-│   └───images
-│       train.json
-│       val.json
-│       test.json
-│       rel.json
-│   
-└───open-imagev6
-    │
-    └───images
-        annotations
+dataset/
+└── visual_genome/
+    └── images/
+        train.json
+        val.json
+        test.json
+        rel.json
 ```
 
-### Prepare pre-trained object detector
+---
 
-To speed up convergence, we first pre-train the object detector with the target dataset. The pre-trained object detector can be downloaded using the following link. [[VG]](https://drive.google.com/file/d/1vEN-Nat8CtrqP9LoKj0llgUJjGoI7CX7/view?usp=drive_link) [[OI]](https://drive.google.com/file/d/1GsGsmYwHfZ55BJwBCWb9-_tovMfUmWBD/view?usp=drive_link)
+## Training
 
-(Optional) The object detector can be trained from scratch as follows:
+PHRI-SGG is trained in two stages.
 
-1) Download the ResNet-50 backbone separately as below. These lines ([line1](https://github.com/huggingface/transformers/blob/v4.18.0/src/transformers/models/detr/modeling_detr.py#L1188), [line2](https://github.com/huggingface/transformers/blob/v4.18.0/src/transformers/models/detr/modeling_detr.py#L804-L809)) initialize the backbone.
+### Stage 1 — Pretrain the Super-Relation Router
 
-```python
-import torch
-from transformers import PretrainedConfig
-from transformers.models.detr.modeling_detr import DetrTimmConvEncoder, DetrConvModel, build_position_encoding
+Before training the full hierarchical model, the super-classifier (family router) is
+pretrained in isolation using a `DualHeadRelationClassifier`. This module shares the
+frozen MLP layers of a converged Flat-50 checkpoint and adds a lightweight 3-class
+head on top, predicting one of three semantic families: Geometric, Possessive, Semantic.
 
-config = PretrainedConfig.from_pretrained("facebook/detr-resnet-50")
-backbone = DetrTimmConvEncoder(config.backbone, config.dilation)
-position_embeddings = build_position_encoding(config)
-backbone = DetrConvModel(backbone, position_embeddings)
-torch.save(backbone.state_dict(), f"{BACKBONE_DIRPATH}/resnet50.pt")
-```
-2) Train DETR as below.
-
-```python
-# Pre-train DETR (using 8 V100 gpus)
-python pretrain_detr.py --data_path dataset/visual_genome --output_path $OUTPUT_PATH --backbone_dirpath $BACKBONE_DIRPATH --memo $MEMO
+```bash
+python train_egtr.py \
+  --data_path dataset/visual_genome \
+  --pretrained $PRETRAINED_DETECTOR_PATH \
+  --main_trained $FLAT_BASELINE_CKPT \
+  --output_path $OUTPUT_PATH \
+  --backbone_dirpath $BACKBONE_DIRPATH
 ```
 
-### Model train
+> This script is located on the `hier_fam_classifier` branch.  
+> The shared MLP layers are loaded from the Flat-50 checkpoint and kept frozen.  
+> Only the `super_head` (3-class linear layer) is trained.
 
-We train EGTR using the pre-trained object detector. Trained EGTR can be downloaded at the following link. [[VG]](https://drive.google.com/file/d/18phcRxbrEI7HqIuM2OLAPuwAF5k3pUC2/view?usp=drive_link) [[OI]](https://drive.google.com/file/d/1JqWNwf1QvDsTbGFigEXXN_8qv3VF-lGP/view?usp=drive_link)
+### Stage 2 — Train PHRI-SGG with Expert Modules
 
-```python
-# Train EGTR (using 8 V100 gpus)
-python train_egtr.py --data_path dataset/visual_genome --output_path $OUTPUT_PATH --pretrained $PRETRAINED_PATH --memo $MEMO
+The pretrained super-classifier checkpoint from Stage 1 is used to warm-start the
+full PHRI-SGG model, which replaces the flat head with three family experts.
+Training uses the same `train_egtr.py` entry point on the `hier_training_distill` branch.
+
+> ⚠️ A unified training script consolidating both stages is planned.
+
+**Frozen Backbone Strategy:** The ResNet-50 backbone and Deformable DETR
+encoder-decoder layers are frozen throughout. Only the hierarchical heads and
+final projection layers receive gradient updates.
+
+**Hardware:** 2× NVIDIA GPU, batch size 16 per GPU, AdamW optimizer,
+learning rate 2×10⁻⁵ for hierarchical heads and 2×10⁻⁶ for unfrozen decoder components.
+---
+
+## Repository Structure
+
+```
+PHRI-SGG/
+├── model/
+│   ├── egtr.py              # Core model — includes hierarchical heads
+│   └── deformable_detr.py   # Backbone config
+├── lib/
+│   └── evaluation/
+│       └── sg_eval.py       # SGG evaluation (R@K, mR@K)
+├── train_egtr.py            # Flat baseline training
+├── train_hier_distill.py    # PHRI-SGG hierarchical training
+├── pretrain_detr.py         # Object detector pretraining
+└── requirements.txt
 ```
 
-### Model evaluation
+---
 
-```python
-# Evaluate EGTR (using 1 V100 gpu)
-python evaluate_egtr.py --data_path dataset/visual_genome --artifact_path $ARTIFACT_PATH
-```
-
-### FPS
-```python
-# Calculate FPS 
-python evaluate_egtr.py --data_path dataset/visual_genome --artifact_path $ARTIFACT_PATH --min_size 600 --max_size 1000 --infer_only True
-```
 ## Citation
 
-```
-@InProceedings{Im_2024_CVPR,
-    author    = {Im, Jinbae and Nam, JeongYeon and Park, Nokyung and Lee, Hyungmin and Park, Seunghyun},
-    title     = {EGTR: Extracting Graph from Transformer for Scene Graph Generation},
-    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-    month     = {June},
-    year      = {2024},
-    pages     = {24229-24238}
+This work builds on EGTR:
+
+```bibtex
+@inproceedings{im2024egtr,
+  title     = {EGTR: Extracting Graph from Transformer for Scene Graph Generation},
+  author    = {Im, Jinbae and others},
+  booktitle = {CVPR},
+  year      = {2024}
 }
 ```
 
-## License
+---
 
-```
-Copyright (c) 2024-present NAVER Cloud Corp.
+## Acknowledgements
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
-
-## References
-- https://github.com/rowanz/neural-motifs
-- https://github.com/yuweihao/KERN
-- https://github.com/SHTUPLUS/PySGG
-- https://github.com/suprosanna/relationformer
-- https://github.com/MCG-NJU/Structured-Sparse-RCNN
-- https://github.com/facebookresearch/detr
-- https://github.com/NielsRogge/Transformers-Tutorials/blob/master/DETR/Fine_tuning_DetrForObjectDetection_on_custom_dataset_(balloon).ipynb
-- https://github.com/huggingface/transformers/blob/v4.18.0/src/transformers/models/detr/modeling_detr.py
-- https://github.com/huggingface/transformers/tree/01eb34ab45a8895fbd9e335568290e5d0f5f4491/src/transformers/models/deformable_detr
+The EGTR codebase provided the foundational architecture for feature extraction, connectivity prediction, and relation smoothing on which PHRI-SGG is built.
